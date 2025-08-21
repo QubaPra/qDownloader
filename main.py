@@ -72,57 +72,37 @@ def build_progress_dict(status="queued", **kw):
     d.update(kw)
     return d
 
-def pick_best_audio(formats: List[dict], preferred_ext: Optional[str]) -> Optional[str]:
+def pick_best_audio(formats: List[dict]) -> Optional[str]:
     """
-    Wybiera najlepszy audio format_id spośród dostępnych formatów.
+    Wybiera najlepszy audio format_id spośród dostępnych formatów audio-only.
     Kryteria:
-    - traktujemy formaty jako audio-only jeżeli vcodec brakowy / 'none' / 'unknown'
-    - acodec musi istnieć i być różny od 'none'/'unknown'
-    - preferujemy audio o zgodnym rozszerzeniu (preferred_ext), jeśli takie występuje
-    - sortujemy po tbr (bitrate), potem po filesize
-    Zwraca format_id (string) lub None.
-    Dodatkowo wypisuje debug info przez print().
+    - audio-only: vcodec brakowy/'none'/'unknown' i acodec istnieje oraz != 'none'/'unknown'
+    - sortowanie: po tbr (lub abr), następnie po filesize
+    Zwraca format_id (str) lub None.
+    Dla debugowania wypisuje ustalony id ścieżki audio.
     """
     audio_streams = []
     for f in formats:
-        vcodec = f.get("vcodec")
-        acodec = f.get("acodec")
-        # traktuj brak vcodec lub 'none'/'unknown' jako audio-only
-        vcodec_norm = str(vcodec).lower() if vcodec is not None else ""
-        acodec_norm = str(acodec).lower() if acodec is not None else ""
-        is_audio_only = (not vcodec) or (vcodec_norm in ("none", "unknown"))
-        has_audio = acodec is not None and acodec_norm not in ("none", "unknown")
+        vcodec = (f.get("vcodec") or "").lower()
+        acodec = (f.get("acodec") or "").lower()
+        is_audio_only = (not vcodec) or (vcodec in ("none", "unknown"))
+        has_audio = acodec not in ("", "none", "unknown")
         if is_audio_only and has_audio:
             audio_streams.append(f)
 
     if not audio_streams:
-        print("[pick_best_audio] brak streamów audio-only")
+        print("[pick_best_audio] Brak dostępnych strumieni audio-only")
         return None
 
-    # pomocniczka: czy ext pasuje do preferowanego
-    def ext_matches(f):
-        ext = (f.get("ext") or "").lower()
-        if not preferred_ext:
-            return False
-        pe = preferred_ext.lower()
-        if pe == "webm":
-            return ext == "webm"
-        if pe in ("mp4", "mov", "mkv"):
-            return ext in ("m4a", "mp4")
-        return ext == pe
+    def score_key(x):
+        tbr = x.get("tbr") or x.get("abr") or 0
+        fs = x.get("filesize") or x.get("filesize_approx") or 0
+        return (tbr, fs)
 
-    # preferuj te z pasującym ext, jeśli są
-    matching = [f for f in audio_streams if ext_matches(f)]
-    candidates = matching if matching else audio_streams
-
-    # sortuj po tbr (bitrate) potem filesize
-    candidates.sort(key=lambda x: ((x.get("tbr") or 0), (x.get("filesize") or 0)), reverse=True)
-
-    chosen = candidates[0]
-    chosen_id = chosen.get("format_id")
-    chosen_ext = chosen.get("ext")
-    chosen_tbr = chosen.get("tbr")
-    print(f"[pick_best_audio] preferred_ext={preferred_ext} candidates={len(audio_streams)} chosen_id={chosen_id} ext={chosen_ext} tbr={chosen_tbr}")
+    audio_streams.sort(key=score_key, reverse=True)
+    chosen = audio_streams[0]
+    chosen_id = str(chosen.get("format_id"))
+    print(f"[audio] chosen_id={chosen_id} ext={chosen.get('ext')} tbr={chosen.get('tbr')} abr={chosen.get('abr')} acodec={chosen.get('acodec')}")
     return chosen_id
 
 
@@ -141,20 +121,21 @@ async def api_probe(url: str = Query(..., description="URL filmu")):
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=400)
 
-    # Przefiltruj i przygotuj dane do tabeli (tylko wideo, bez audio-only)
+    # Przefiltruj i przygotuj dane do tabeli: tylko VIDEO ONLY (jak w -F: "video only")
     formats = info.get("formats", [])
     cleaned = []
     for f in formats:
         ext = f.get("ext")
         vcodec = f.get("vcodec")
         acodec = f.get("acodec")
-        # wyklucz audio-only
-        if vcodec in (None, "none"):
+        # bierz tylko video-only (acodec brak/none/unknown) i z dozwolonym rozszerzeniem
+        vcodec_ok = vcodec not in (None, "none")  # ma część wideo
+        acodec_none = (acodec in (None, "none", "unknown"))
+        if not vcodec_ok or not acodec_none:
             continue
-        # wyklucz nieistotne/ext spoza listy
         if ext not in ALLOWED_VIDEO_EXTS:
             continue
-        # fps i bitrate estetycznie
+
         height = f.get("height")
         fps = f.get("fps")
         res = f"{height or '-'}p"
@@ -225,15 +206,15 @@ async def api_list_dir(path: Optional[str] = None):
 @app.post("/api/start_download")
 async def api_start_download(request: Request):
     """
-    Start pobierania:
-    - otrzymuje url, video_format_id, prefer_ext, dest_path
-    - dobiera najlepsze audio (preferując zgodne rozszerzenie)
-    - łączy format jako "video_id+audio_id" (np. 234+411)
+    Start pobierania w stylu yt-dlp -F:
+    - lista do pobrania pokazuje warianty 'video only'
+    - przy starcie dobieramy najlepszy 'audio only' i łączymy jako "video_id+audio_id"
+    - jeśli brak 'audio only', pobieramy samo wideo "video_id"
     """
     body = await request.json()
     url = body.get("url")
     video_format_id = body.get("format_id")
-    prefer_ext = body.get("prefer_ext")
+    # prefer_ext ignorujemy – brak wymogu zgodności rozszerzeń audio i wideo
     dest_path = body.get("dest_path")
 
     if not url or not video_format_id or not dest_path:
@@ -246,35 +227,23 @@ async def api_start_download(request: Request):
     job_dirs[job_id] = job_dir
     job_flags[job_id] = {"pause": False, "cancel": False}
 
-        # Wstępny probe, aby dobrać audio-id i tytuł
+    # Wstępny probe, aby dobrać audio-id i tytuł
     try:
         with yt_dlp.YoutubeDL({"quiet": True, "skip_download": True, "noplaylist": True}) as ydl:
             info = ydl.extract_info(url, download=False)
         all_formats = info.get("formats", [])
-        # DEBUG: wypisz krótkie info o formatach (możesz rozwinąć)
         print(f"[start_download] probe: znaleziono {len(all_formats)} formatów dla URL={url}")
-        # wybierz audio id
-        audio_id = pick_best_audio(all_formats, preferred_ext=prefer_ext)
-        # Sprawdź czy wybrany video_format_id sam zawiera audio (muxed)
-        selected_format = None
-        for f in all_formats:
-            # format_id może być int lub string, porównujemy jako str
-            if str(f.get("format_id")) == str(video_format_id):
-                selected_format = f
-                break
+        # wybierz audio id spośród audio-only (bez dopasowywania rozszerzeń)
+        audio_id = pick_best_audio(all_formats)
 
         if audio_id:
             format_selector = f"{video_format_id}+{audio_id}"
-            print(f"[start_download] wybrano audio {audio_id}, używam selector={format_selector}")
+            print(f"[start_download] używam selector={format_selector}")
         else:
-            # Jeżeli wybrany wideo-format zawiera acodec (czyli już ma audio), użyj samego video_format_id.
-            if selected_format and selected_format.get("acodec") and str(selected_format.get("acodec")).lower() not in ("none", "unknown"):
-                format_selector = str(video_format_id)
-                print(f"[start_download] selected format {video_format_id} zawiera audio (acodec={selected_format.get('acodec')}), pobieram tylko ten format.")
-            else:
-                # Brak audio — pobierz tylko video (zgodnie z prośbą)
-                format_selector = str(video_format_id)
-                print(f"[start_download] brak osobnego audio; pobieram tylko video format {video_format_id} (bez audio).")
+            # Brak audio-only — pobierz tylko video
+            format_selector = str(video_format_id)
+            print(f"[start_download] brak strumieni audio-only; pobieram tylko video format {video_format_id}")
+
         job_progress[job_id] = build_progress_dict(
             status="starting",
             video_title=info.get("title"),
@@ -286,7 +255,6 @@ async def api_start_download(request: Request):
         del job_dirs[job_id]
         del job_flags[job_id]
         raise HTTPException(status_code=400, detail=f"Nie udało się przygotować pobierania: {e}")
-
 
     # Odpal pobieranie asynchronicznie
     task = asyncio.create_task(download_job(job_id, url, format_selector, dest_path))
@@ -460,4 +428,3 @@ async def download_job(job_id: str, url: str, format_selector: str, dest_path: s
             job_flags[job_id]["pause"] = False
             if job_progress.get(job_id, {}).get("status") == "done":
                 job_flags[job_id]["cancel"] = False
-
