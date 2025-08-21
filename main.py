@@ -83,6 +83,7 @@ def pick_best_audio(formats: List[dict]) -> Optional[str]:
     """
     audio_streams = []
     for f in formats:
+        print(f"[pick_best_audio] Sprawdzam format: {f.get('format_id')} ext={f.get('ext')} vcodec={f.get('vcodec')} acodec={f.get('acodec')}")
         vcodec = (f.get("vcodec") or "").lower()
         acodec = (f.get("acodec") or "").lower()
         is_audio_only = (not vcodec) or (vcodec in ("none", "unknown"))
