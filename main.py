@@ -89,7 +89,7 @@ def pick_best_audio(formats: List[dict]) -> Optional[str]:
         return None
 
     # sortuj po id (str)
-    audio_streams.sort(key=lambda x: x.get("format_id", ""), rewerse=True)    
+    audio_streams.sort(key=lambda x: x.get("format_id", ""), reverse=True)    
     chosen_id = str(audio_streams[0].get("format_id"))
     print(f"[pick_best_audio] Wybrano audio format_id: {chosen_id}")
     return chosen_id
