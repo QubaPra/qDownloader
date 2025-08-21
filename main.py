@@ -75,35 +75,23 @@ def build_progress_dict(status="queued", **kw):
 def pick_best_audio(formats: List[dict]) -> Optional[str]:
     """
     Wybiera najlepszy audio format_id spośród dostępnych formatów audio-only.
-    Kryteria:
-    - audio-only: vcodec brakowy/'none'/'unknown' i acodec istnieje oraz != 'none'/'unknown'
-    - sortowanie: po tbr (lub abr), następnie po filesize
     Zwraca format_id (str) lub None.
     Dla debugowania wypisuje ustalony id ścieżki audio.
     """
     audio_streams = []
     for f in formats:
-        print(f"[pick_best_audio] Sprawdzam format: {f.get('format_id')} ext={f.get('ext')} vcodec={f.get('vcodec')} acodec={f.get('acodec')}")
-        vcodec = (f.get("vcodec") or "").lower()
-        acodec = (f.get("acodec") or "").lower()
-        is_audio_only = (not vcodec) or (vcodec in ("none", "unknown"))
-        has_audio = acodec not in ("", "none", "unknown")
-        if is_audio_only and has_audio:
+        resolution = (f.get("resolution") or "").lower()
+        if resolution == "audio only":
             audio_streams.append(f)
 
     if not audio_streams:
         print("[pick_best_audio] Brak dostępnych strumieni audio-only")
         return None
 
-    def score_key(x):
-        tbr = x.get("tbr") or x.get("abr") or 0
-        fs = x.get("filesize") or x.get("filesize_approx") or 0
-        return (tbr, fs)
-
-    audio_streams.sort(key=score_key, reverse=True)
-    chosen = audio_streams[0]
-    chosen_id = str(chosen.get("format_id"))
-    print(f"[audio] chosen_id={chosen_id} ext={chosen.get('ext')} tbr={chosen.get('tbr')} abr={chosen.get('abr')} acodec={chosen.get('acodec')}")
+    # sortuj po id (str)
+    audio_streams.sort(key=lambda x: x.get("format_id", ""))    
+    chosen_id = str(audio_streams[0].get("format_id"))
+    print(f"[pick_best_audio] Wybrano audio format_id: {chosen_id}")
     return chosen_id
 
 
