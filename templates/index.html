@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"/>
+  <title>Mobile Video Downloader</title>
+  <link rel="stylesheet" href="/static/style.css"/>
+</head>
+<body>
+  <div class="app">
+    <header class="app-header">
+      <h1>Video Downloader</h1>
+      <nav class="tabs">
+        <button id="tab-yt" class="tab active">YouTube</button>
+        <button id="tab-twitch" class="tab">Twitch</button>
+      </nav>
+    </header>
+
+    <main class="container">
+      <!-- YOUTUBE -->
+      <section id="youtube-panel" class="panel">
+        <label>URL filmu YouTube</label>
+        <input id="yt-url" placeholder="Wklej URL..."/>
+
+        <div class="row-gap">
+          <label>Folder docelowy</label>
+          <div class="dest-row">
+            <input id="dest-path" value="/storage/3430-6432/Movies/YT" />
+            <button id="btn-explorer" class="ghost">Wybierz…</button>
+          </div>
+          <div class="small">Wybierz folder przez wbudowany eksplorator (serwerowy) lub wpisz ręcznie.</div>
+        </div>
+
+        <div class="actions">
+          <button id="btn-probe">Szukaj formatów</button>
+          <div id="spinner" class="spinner hidden" aria-label="Trwa wyszukiwanie…"></div>
+        </div>
+
+        <div id="video-info" class="card hidden">
+          <img id="thumb" alt="miniaturka"/>
+          <div class="video-meta">
+            <h2 id="title" class="ellipsis"></h2>
+            <div id="uploader" class="muted ellipsis"></div>
+            <div id="duration" class="muted"></div>
+          </div>
+        </div>
+
+        <div id="filters" class="filters hidden">
+          <label>Rozszerzenie:
+            <select id="filter-ext"><option value="">Wszystkie</option></select>
+          </label>
+          <label>FPS:
+            <select id="filter-fps"><option value="">Wszystkie</option></select>
+          </label>
+        </div>
+
+        <div id="formats-table" class="table-container hidden">
+          <table>
+            <thead>
+              <tr>
+                <th>Ext</th>
+                <th>Jakość</th>
+                <th>Bitrate</th>
+                <th>Rozmiar</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="formats-body"></tbody>
+          </table>
+        </div>
+
+        <div id="progress-area" class="hidden">
+          <div id="progress-bar"><div id="progress-fill"></div></div>
+          <div id="progress-stats"></div>
+          <div class="row">
+            <button id="btn-pause" class="ghost">Wstrzymaj</button>
+            <button id="btn-resume" class="ghost hidden">Wznów</button>
+            <button id="btn-cancel" class="ghost danger">Anuluj</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- TWITCH (placeholder) -->
+      <section id="twitch-panel" class="panel hidden">
+        <p class="muted">Twitch Downloader dodamy później.</p>
+      </section>
+    </main>
+  </div>
+
+  <!-- Modal: Explorer -->
+  <div id="explorer-modal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <div>Wybierz folder</div>
+        <button id="explorer-close" class="ghost">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="explorer-path" id="explorer-path">/</div>
+        <div id="explorer-list" class="explorer-list"></div>
+      </div>
+      <div class="modal-foot">
+        <button id="explorer-use" class="primary">Użyj tego folderu</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
+

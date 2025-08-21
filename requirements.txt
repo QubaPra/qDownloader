@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+yt-dlp
+jinja2
+aiofiles
+python-multipart
+requests
+websockets
