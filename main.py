@@ -89,7 +89,7 @@ def pick_best_audio(formats: List[dict]) -> Optional[str]:
         return None
 
     # sortuj po id (str)
-    audio_streams.sort(key=lambda x: x.get("format_id", ""), requested=True)    
+    audio_streams.sort(key=lambda x: x.get("format_id", ""), rewerse=True)    
     chosen_id = str(audio_streams[0].get("format_id"))
     print(f"[pick_best_audio] Wybrano audio format_id: {chosen_id}")
     return chosen_id
@@ -203,7 +203,6 @@ async def api_start_download(request: Request):
     body = await request.json()
     url = body.get("url")
     video_format_id = body.get("format_id")
-    # prefer_ext ignorujemy – brak wymogu zgodności rozszerzeń audio i wideo
     dest_path = body.get("dest_path")
 
     if not url or not video_format_id or not dest_path:
