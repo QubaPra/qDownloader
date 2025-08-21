@@ -123,6 +123,7 @@ async def api_probe(url: str = Query(..., description="URL filmu")):
         return JSONResponse({"error": str(e)}, status_code=400)
 
     # Przefiltruj i przygotuj dane do tabeli: tylko VIDEO ONLY (jak w -F: "video only")
+    print(f"{info}")
     formats = info.get("formats", [])
     cleaned = []
     for f in formats:
