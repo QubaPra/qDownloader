@@ -111,7 +111,6 @@ async def api_probe(url: str = Query(..., description="URL filmu")):
         return JSONResponse({"error": str(e)}, status_code=400)
 
     # Przefiltruj i przygotuj dane do tabeli: tylko VIDEO ONLY (jak w -F: "video only")
-    print(f"{info}")
     formats = info.get("formats", [])
     cleaned = []
     for f in formats:
@@ -222,13 +221,11 @@ async def api_start_download(request: Request):
         with yt_dlp.YoutubeDL({"quiet": True, "skip_download": True, "noplaylist": True}) as ydl:
             info = ydl.extract_info(url, download=False)
         all_formats = info.get("formats", [])
-        print(f"[start_download] probe: znaleziono {len(all_formats)} formatów dla URL={url}")
         # wybierz audio id spośród audio-only (bez dopasowywania rozszerzeń)
         audio_id = pick_best_audio(all_formats)
 
         if audio_id:
             format_selector = f"{video_format_id}+{audio_id}"
-            print(f"[start_download] używam selector={format_selector}")
         else:
             # Brak audio-only — pobierz tylko video
             format_selector = str(video_format_id)
