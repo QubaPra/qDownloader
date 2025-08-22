@@ -39,9 +39,9 @@
         <div id="video-info" class="card hidden">
           <img id="thumb" alt="miniaturka"/>
           <div class="video-meta">
-            <h2 id="title" class="ellipsis"></h2>
-            <div id="uploader" class="muted ellipsis"></div>
-            <div id="duration" class="muted"></div>
+            <h2 id="title" class="wrap"></h2>
+            <div id="uploader" class="muted wrap"></div>
+            <div id="duration" class="muted wrap"></div>
           </div>
         </div>
 
@@ -70,12 +70,16 @@
         </div>
 
         <div id="progress-area" class="hidden">
-          <div id="progress-bar"><div id="progress-fill"></div></div>
+          <div class="row" style="align-items:center; gap:8px;">
+            <div id="dl-spinner" class="spinner hidden" aria-label="Uruchamianie pobierania…"></div>
+            <div id="progress-bar"><div id="progress-fill"></div></div>
+          </div>
           <div id="progress-stats"></div>
           <div class="row">
             <button id="btn-pause" class="ghost">Wstrzymaj</button>
             <button id="btn-resume" class="ghost hidden">Wznów</button>
             <button id="btn-cancel" class="ghost danger">Anuluj</button>
+            <button id="btn-open" class="ghost hidden">Otwórz folder</button>
           </div>
         </div>
       </section>
@@ -107,4 +111,3 @@
   <script src="/static/app.js"></script>
 </body>
 </html>
-

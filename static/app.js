@@ -37,6 +37,8 @@ const progressStats = document.getElementById('progress-stats');
 const btnPause = document.getElementById('btn-pause');
 const btnResume = document.getElementById('btn-resume');
 const btnCancel = document.getElementById('btn-cancel');
+const btnOpen = document.getElementById('btn-open');
+const dlSpinner = document.getElementById('dl-spinner');
 
 // Explorer modal
 const btnExplorer = document.getElementById('btn-explorer');
@@ -99,6 +101,8 @@ let currentFormats = [];
 let rawFormats = [];
 let currentJobId = null;
 let ws = null;
+let lastUiUpdate = 0;
+let lastDestPath = null;
 
 // ── Akcje ───────────────────────────────────────────────────────────────────
 btnProbe.onclick = async () => {
@@ -168,6 +172,23 @@ function humanSize(bytes){
   while (n>=1000 && i<units.length-1){ n/=1000; i++; }
   return n.toFixed(2)+' '+units[i];
 }
+function formatSeconds(s){
+  if (s == null) return '-';
+  const n = Math.max(0, Math.round(Number(s)));
+  const h = Math.floor(n/3600);
+  const m = Math.floor((n%3600)/60);
+  const sec = n%60;
+  const hh = String(h).padStart(2,'0');
+  const mm = String(m).padStart(2,'0');
+  const ss = String(sec).padStart(2,'0');
+  return `${hh}:${mm}:${ss}`;
+}
+function formatSpeed(bps){
+  if (!bps) return '-';
+  const kbps = bps/1000;
+  if (kbps >= 1000) return (kbps/1000).toFixed(2) + ' MB/s';
+  return Math.round(kbps) + ' KB/s';
+}
 
 function renderFormats(list){
   formatsBody.innerHTML = '';
@@ -196,9 +217,13 @@ async function startDownload(format_id, prefer_ext){
   if (!url){ alert("Brak URL"); return; }
   if (!dest){ alert("Wybierz folder docelowy"); return; }
 
-  if(!confirm("Rozpocząć pobieranie wybranego formatu?")){
-    return;
-  }
+  // pokaż panel progresu natychmiast z kółkiem ładowania
+  progressArea.classList.remove('hidden');
+  formatsTable.classList.add('hidden');
+  filters.classList.add('hidden');
+  progressFill.style.width = '0%';
+  progressStats.textContent = 'Przygotowywanie…';
+  dlSpinner.classList.remove('hidden');
 
   const payload = {
     url,
@@ -208,39 +233,45 @@ async function startDownload(format_id, prefer_ext){
   };
   const resp = await fetch('/api/start_download', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
   if(!resp.ok){
+    dlSpinner.classList.add('hidden');
     alert("Błąd: " + await resp.text());
     return;
   }
   const data = await resp.json();
   currentJobId = data.job_id;
 
-  // Schowaj tabelę, pokaż progres
-  formatsTable.classList.add('hidden');
-  filters.classList.add('hidden');
-  progressArea.classList.remove('hidden');
-  progressFill.style.width = '0%';
-  progressStats.textContent = 'Przygotowywanie…';
-
   openWS(currentJobId);
 }
 
 function openWS(jobId){
   if (ws) try{ ws.close(); }catch(e){}
+  lastUiUpdate = 0;
   ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + `/ws/${jobId}`);
   ws.onmessage = (ev) => {
     const d = JSON.parse(ev.data || "{}");
     if (d.error){ return; }
+
+    // odświeżaj co 1s (throttle)
+    const now = Date.now();
+    if (now - lastUiUpdate < 1000) return;
+    lastUiUpdate = now;
+
     const pct = Math.max(0, Math.min(100, Math.round(d.progress || 0)));
     progressFill.style.width = pct + '%';
-    const speed = d.speed ? `${Math.round(d.speed/1000)} KB/s` : '-';
-    const eta = d.eta != null ? `${d.eta}s` : '-';
+    const speed = formatSpeed(d.speed);
+    const eta = formatSeconds(d.eta);
     const down = humanSize(d.downloaded_bytes) || '-';
     const total = humanSize(d.total_bytes) || '-';
     const status = d.status || '-';
     const msg = d.message || '';
 
+    // schowaj spinner gdy faktycznie pobiera
+    if (status !== 'starting' && status !== 'queued' && status !== 'probing') {
+      dlSpinner.classList.add('hidden');
+    }
+
     progressStats.textContent =
-      `Status: ${status} • ${pct}% • ${down} / ${total} • prędkość: ${speed} • ETA: ${eta} ${msg ? ' • ' + msg : ''}`;
+      `Status: ${status} • ${pct}% • ${down} / ${total} • prędkość: ${speed} • ETA: ${eta}${msg ? ' • ' + msg : ''}`;
 
     if (status === 'paused'){
       btnPause.classList.add('hidden');
@@ -250,7 +281,31 @@ function openWS(jobId){
       btnResume.classList.add('hidden');
     }
 
-    if (status === 'done' || status === 'error'){
+    if (status === 'canceled') {
+      // po anulowaniu — usuń progres i pokaż listę formatów
+      try{ ws.close(); }catch(e){}
+      currentJobId = null;
+      progressArea.classList.add('hidden');
+      btnResume.classList.add('hidden');
+      btnPause.classList.remove('hidden'); // przywróć domyślnie
+      btnCancel.classList.remove('hidden');
+      btnOpen.classList.add('hidden');
+      formatsTable.classList.remove('hidden');
+      filters.classList.remove('hidden');
+      return;
+    }
+
+    if (status === 'done'){
+      try{ ws.close(); }catch(e){}
+      // ukryj sterowanie, pokaż "Otwórz folder"
+      btnPause.classList.add('hidden');
+      btnResume.classList.add('hidden');
+      btnCancel.classList.add('hidden');
+      btnOpen.classList.remove('hidden');
+      lastDestPath = d.dest_path || lastDestPath;
+    }
+
+    if (status === 'error'){
       try{ ws.close(); }catch(e){}
     }
   };
@@ -284,12 +339,10 @@ btnCancel.onclick = async () => {
   await fetch('/api/cancel', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({job_id: currentJobId})});
 };
 
-// ── Utils ───────────────────────────────────────────────────────────────────
-function humanSize(bytes){
-  if (!bytes) return "-";
-  const units = ['B','KB','MB','GB'];
-  let i=0; let n=bytes;
-  while (n>=1000 && i<units.length-1){ n/=1000; i++; }
-  return n.toFixed(2)+' '+units[i];
-}
-
+// Otwórz folder docelowy (wbudowany eksplorator)
+btnOpen.onclick = async () => {
+  const path = lastDestPath || destPath.value.trim();
+  if (!path) return;
+  explorerModal.classList.remove('hidden');
+  await loadExplorer(path);
+};

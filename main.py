@@ -58,7 +58,7 @@ def human_size(bytes_: Optional[int]) -> Optional[str]:
 
 def build_progress_dict(status="queued", **kw):
     d = {
-        "status": status,           # queued | starting | probing | downloading | paused | finished | done | error
+        "status": status,           # queued | starting | probing | downloading | paused | finished | done | canceled | error
         "progress": 0.0,            # %
         "downloaded_bytes": 0,
         "total_bytes": None,
@@ -294,7 +294,7 @@ async def ws_progress(websocket: WebSocket, job_id: str):
                 await websocket.send_json({"error": "job_id not found"})
             else:
                 await websocket.send_json(job_progress[job_id])
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1.0)  # aktualizuj co 1s
     except WebSocketDisconnect:
         pass
     finally:
@@ -399,7 +399,7 @@ async def download_job(job_id: str, url: str, format_selector: str, dest_path: s
             job_progress[job_id].update({"status": "paused", "message": "Wstrzymano. Możesz wznowić.", "progress": job_progress[job_id].get("progress", 0.0)})
             # nie czyścimy katalogu, aby można było wznowić
         elif "Zatrzymano przez użytkownika" in msg:
-            job_progress[job_id].update({"status": "error", "message": "Anulowano pobieranie."})
+            job_progress[job_id].update({"status": "canceled", "message": "Anulowano pobieranie."})
             # Anulowanie — sprzątamy
             shutil.rmtree(job_dir, ignore_errors=True)
             job_dirs.pop(job_id, None)
