@@ -20,9 +20,9 @@
         <span class="icon">▶</span>
         <span>YouTube</span>
       </button>
-      <button class="tab" data-tab="twitch" disabled>
+      <button class="tab" data-tab="twitch">
         <span class="icon">☁</span>
-        <span>Twitch (wkrótce)</span>
+        <span>Twitch</span>
       </button>
     </nav>
 
@@ -40,6 +40,33 @@
         </div>
 
         <div id="queue"></div>
+      </section>
+
+      <section id="tab-twitch" class="tab-panel">
+        <div class="card input-card">
+          <div class="field">
+            <label>Folder zapisu (opcjonalnie)</label>
+            <input id="twPathInput" type="text" placeholder="np. D:\\Video\\Twitch lub pozostaw puste" />
+          </div>
+          <div class="field">
+            <label>Format wyjściowy</label>
+            <select id="twExt">
+              <option value="mp4">mp4</option>
+              <option value="ts">ts</option>
+              <option value="webm">webm</option>
+              <option value="mkv">mkv</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>URL VOD Twitch lub bezpośredni M3U8</label>
+            <input id="twUrl" type="url" placeholder="https://www.twitch.tv/videos/XXXXXXXX lub https://....index-dvr.m3u8" />
+          </div>
+          <div class="field">
+            <button id="twCheck" class="btn">Sprawdź dostępne jakości</button>
+          </div>
+        </div>
+
+        <div id="twResults"></div>
       </section>
     </main>
   </div>

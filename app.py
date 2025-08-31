@@ -9,6 +9,7 @@ import time
 import uuid
 import subprocess
 import threading
+import contextlib
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -19,6 +20,9 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from jinja2 import Environment, FileSystemLoader, select_autoescape
+from urllib.request import Request as UrlRequest, urlopen
+from urllib.parse import quote, urlparse
+from html.parser import HTMLParser
 
 # ===== Utils =====
 ROOT = Path(__file__).parent.resolve()
@@ -202,6 +206,18 @@ class DownloadRequest(BaseModel):
     url: str
     format_id: str
     download_dir: Optional[str] = None
+
+# ===== Twitch Schemas =====
+class TwitchResolveRequest(BaseModel):
+    url: str
+
+
+class TwitchDownloadRequest(BaseModel):
+    m3u8_url: str
+    download_dir: Optional[str] = None
+    ext: str = "mp4"  # mp4|ts|webm|mkv
+    start_sec: Optional[float] = None
+    end_sec: Optional[float] = None
 
 
 # ===== Templating =====
@@ -648,3 +664,582 @@ async def yt_download(data: DownloadRequest):
 
 
 # ===== Static HTML =====
+
+# ======== Twitch helpers =========
+
+DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/127.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9",
+    "Accept-Language": "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+    "Save-Data": "on",
+    "Connection": "close",
+}
+
+
+class _MetaFinder(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.og_image: Optional[str] = None
+        self.og_title: Optional[str] = None
+        self.og_site: Optional[str] = None
+        self.og_duration: Optional[str] = None
+
+    def handle_starttag(self, tag: str, attrs):
+        if tag.lower() != "meta":
+            return
+        attr = {k.lower(): v for k, v in attrs}
+        key = (attr.get("property") or attr.get("name") or "").lower()
+        if key in ("og:image", "og:image:secure_url", "twitter:image"):
+            self.og_image = self.og_image or attr.get("content")
+        elif key in ("og:title", "twitter:title"):
+            self.og_title = self.og_title or attr.get("content")
+        elif key in ("og:site_name",):
+            self.og_site = self.og_site or attr.get("content")
+        elif key in ("video:duration", "og:video:duration"):
+            self.og_duration = self.og_duration or attr.get("content")
+
+
+def _http_get(url: str, headers: Optional[Dict[str, str]] = None, timeout: float = 20) -> bytes:
+    req = UrlRequest(url, headers={**DEFAULT_HEADERS, **(headers or {})})
+    with urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+def _http_head_ok(url: str, timeout: float = 10) -> bool:
+    try:
+        req = UrlRequest(url, headers=DEFAULT_HEADERS, method="HEAD")
+        with urlopen(req, timeout=timeout) as resp:
+            return 200 <= getattr(resp, 'status', 200) < 400
+    except Exception:
+        # Fallback: mały GET z Range, aby sprawdzić dostępność
+        try:
+            hdrs = {**DEFAULT_HEADERS, "Range": "bytes=0-1"}
+            req = UrlRequest(url, headers=hdrs)
+            with urlopen(req, timeout=timeout) as resp:
+                return 200 <= getattr(resp, 'status', 206) < 500  # 206 Partial Content akceptowalny
+        except Exception:
+            return False
+
+
+def _extract_meta_from_html(html: str) -> Dict[str, Optional[str]]:
+    p = _MetaFinder()
+    try:
+        p.feed(html)
+    except Exception:
+        pass
+    return {
+        "thumbnail": p.og_image,
+        "title": p.og_title,
+        "site": p.og_site,
+        "duration": p.og_duration,
+    }
+
+
+def _twitch_oembed(vod_url: str) -> Dict[str, Optional[str]]:
+    oembed = f"https://www.twitch.tv/oembed?format=json&url={quote(vod_url, safe='')}"
+    try:
+        data = _http_get(oembed, headers={"Accept": "application/json"})
+        payload = json.loads(data.decode("utf-8", errors="ignore"))
+        return {
+            "title": payload.get("title"),
+            "channel": payload.get("author_name"),
+            "thumbnail": payload.get("thumbnail_url") or payload.get("thumbnail"),
+        }
+    except Exception:
+        return {}
+
+
+def _clean_title(title: Optional[str], channel: Optional[str]) -> Optional[str]:
+    """Wycina z końca tytułu fragmenty typu:
+    - " – <kanał> na Twitchu"
+    - " — <kanał> na Twitchu"
+    - " - <kanał> na Twitchu"
+    - oraz same „ – Twitch/na Twitchu”.
+    Dodatkowo toleruje brak fragmentu „na Twitchu” i różne rodzaje myślników.
+    """
+    if not title:
+        return title
+    t = str(title)
+    # Różne myślniki: en dash, em dash, zwykły minus
+    dash = r"[–—-]"
+    # Spacje, w tym NBSP i wąskie niełamiące
+    sp = r"[\s\u00A0\u202F]*"
+    if channel:
+        # " – <kanał> (na|on)? Twitch(u)?" na końcu
+        pat1 = re.compile(rf"{sp}{dash}{sp}{re.escape(channel)}{sp}(?:na|on)?{sp}twitchu?{sp}$", re.IGNORECASE)
+        t = re.sub(pat1, "", t)
+        # lub samo " – <kanał>" na końcu
+        pat2 = re.compile(rf"{sp}{dash}{sp}{re.escape(channel)}{sp}$", re.IGNORECASE)
+        t = re.sub(pat2, "", t)
+    # Ogólne: " – Twitch/na Twitchu" na końcu
+    pat3 = re.compile(rf"{sp}{dash}{sp}(?:na{sp})?twitchu?{sp}$", re.IGNORECASE)
+    t = re.sub(pat3, "", t)
+    # Ewentualne pozostałości typu " –" na samym końcu
+    t = re.sub(rf"{sp}{dash}{sp}$", "", t)
+    return t.strip()
+
+
+def _extract_channel_from_title(title: Optional[str]) -> Optional[str]:
+    """Spróbuj wyłuskać nazwę kanału z końcówki tytułu, np.:
+    "… – youngmulti na Twitchu" -> "youngmulti"
+    "… - youngmulti" -> "youngmulti"
+    Zwraca None, jeśli nie można jednoznacznie wykryć.
+    """
+    if not title:
+        return None
+    t = str(title)
+    dash = r"[–—-]"
+    sp = r"[\s\u00A0\u202F]*"
+    # Najpierw wariant z „na Twitchu”
+    m = re.search(rf"{dash}{sp}([^\-–—|]+?){sp}(?:na|on)?{sp}twitchu?{sp}$", t, flags=re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    # Potem ogólny: po myślniku do końca
+    m2 = re.search(rf"{dash}{sp}([^\-–—|]+?){sp}$", t)
+    if m2:
+        return m2.group(1).strip()
+    return None
+
+
+def _derive_cloudfront_from_thumb(thumb_url: str) -> Optional[str]:
+    try:
+        u = urlparse(thumb_url)
+        m = re.search(r"/cf_vods/([^/]+)/([^/]+)/", u.path)
+        if not m:
+            return None
+        id1, id2 = m.group(1), m.group(2)
+        return f"https://{id1}.cloudfront.net/{id2}/chunked/index-dvr.m3u8"
+    except Exception:
+        return None
+
+
+def _parse_m3u8_duration(m3u8_text: str) -> float:
+    total = 0.0
+    for line in m3u8_text.splitlines():
+        if line.startswith("#EXTINF:"):
+            try:
+                # #EXTINF:4.000,
+                val = line.split(":", 1)[1]
+                sec = float(val.split(",", 1)[0].strip())
+                total += sec
+            except Exception:
+                continue
+    return total
+
+
+def _estimate_size_bytes(quality: str, duration_sec: float) -> Optional[int]:
+    # Szacunkowe bitrate (kbps) na podstawie resolution@fps
+    kbps_map = {
+        "1080p60": 8000,
+        "1080p30": 5000,
+        "720p60": 4500,
+        "720p30": 3000,
+        "480p30": 1500,
+        "360p30": 800,
+        "160p30": 250,
+        "chunked": 8000,
+    }
+    kbps = kbps_map.get(quality)
+    if kbps is None or duration_sec <= 0:
+        return None
+    bps = kbps * 1000
+    return int(duration_sec * (bps / 8))
+
+
+def _quality_order(q: str) -> tuple:
+    # sortuj po wysokości i fps
+    m = re.match(r"(\d+)p(\d+)?", q)
+    if not m:
+        return (0, 0)
+    h = int(m.group(1))
+    fps = int(m.group(2) or 0)
+    return (h, fps)
+
+
+def _build_quality_urls(chunked_url: str) -> List[Dict[str, str]]:
+    qualities = [
+        "1080p60", "1080p30", "720p60", "720p30",
+        "480p30", "360p30", "160p30",
+    ]
+    out = []
+    for q in qualities:
+        out.append({"label": q, "url": chunked_url.replace("chunked", q)})
+    # na końcu dodaj oryginalny 'chunked'
+    out.append({"label": "chunked", "url": chunked_url})
+    return out
+
+
+def _safe_decode(b: bytes) -> str:
+    return b.decode("utf-8", errors="ignore")
+
+
+@app.post("/api/twitch/resolve")
+async def twitch_resolve(data: TwitchResolveRequest):
+    url = data.url.strip()
+    if not url:
+        raise HTTPException(400, "URL jest wymagany")
+
+    # Jeśli to już jest adres m3u8 – użyj go wprost
+    base_m3u8 = None
+    meta: Dict[str, Optional[str]] = {"title": None, "channel": None, "thumbnail": None}
+    duration_sec: float = 0.0
+
+    if ".m3u8" in url:
+        base_m3u8 = url
+    else:
+        # Pobierz HTML strony i meta (thumbnail/title/channel/duration)
+        try:
+            html = _safe_decode(_http_get(url))
+            meta_html = _extract_meta_from_html(html)
+            meta["thumbnail"] = meta_html.get("thumbnail") or None
+            meta["title"] = meta_html.get("title") or None
+            # channel z meta brak – dostarcz oEmbed
+        except Exception:
+            pass
+        # oEmbed (title, channel, thumbnail)
+        oemb = _twitch_oembed(url)
+        # Preferuj oEmbed dla title/channel, bo HTML często ma sufiks "na Twitchu"
+        if oemb.get("title"):
+            meta["title"] = oemb.get("title")
+        if oemb.get("channel"):
+            meta["channel"] = oemb.get("channel")
+        if oemb.get("thumbnail") and not meta.get("thumbnail"):
+            meta["thumbnail"] = oemb.get("thumbnail")
+
+        # Spróbuj zbudować m3u8 z miniatury (cf_vods)
+        thumb = meta.get("thumbnail")
+        if thumb:
+            base_m3u8 = _derive_cloudfront_from_thumb(thumb)
+
+    if not base_m3u8:
+        raise HTTPException(400, "Nie udało się ustalić adresu M3U8 (wklej URL m3u8 lub VOD Twitch)")
+
+    # Policz długość z listy odtwarzania (chunked)
+    try:
+        playlist_text = _safe_decode(_http_get(base_m3u8, headers={"Accept": "application/vnd.apple.mpegurl"}))
+        duration_sec = _parse_m3u8_duration(playlist_text)
+    except Exception:
+        duration_sec = 0.0
+
+    # Sprawdź dostępne jakości przez HEAD
+    q_urls = _build_quality_urls(base_m3u8)
+    available: List[Dict[str, Any]] = []
+    seen_labels: set[str] = set()
+    for item in q_urls:
+        u = item["url"]
+        lbl = item["label"]
+        # Nie pokazuj surowego 'chunked' – relabel na 1080p60
+        if lbl == "chunked":
+            lbl = "1080p60"
+        if _http_head_ok(u):
+            if lbl in seen_labels:
+                continue
+            seen_labels.add(lbl)
+            est = _estimate_size_bytes(lbl, duration_sec)
+            available.append({
+                "label": lbl,
+                "m3u8": u,
+                "size_est": human_size(est) if est else "-",
+            })
+
+    # Sortuj jakość od najlepszej (wysokość/fps) z 'chunked' na szczycie
+    available.sort(key=lambda x: _quality_order(x["label"]), reverse=True)
+
+    # Jeżeli kanał nadal nieznany, spróbuj wyłuskać go z tytułu
+    if not meta.get("channel") and meta.get("title"):
+        ch = _extract_channel_from_title(meta.get("title"))
+        if ch:
+            meta["channel"] = ch
+
+    cleaned_title = _clean_title(meta.get("title"), meta.get("channel"))
+
+    return {
+        "base_m3u8": base_m3u8,
+        "title": cleaned_title,
+        "channel": meta.get("channel"),
+        "thumbnail": meta.get("thumbnail"),
+        "duration": int(duration_sec),
+        "qualities": available,
+    }
+
+
+async def run_download_twitch(job_id: str, m3u8_url: str, out_dir: Path, ext: str, start_sec: Optional[float], end_sec: Optional[float]):
+    out_dir.mkdir(parents=True, exist_ok=True)
+    temp_dir = out_dir / f".tmp_{job_id}"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+
+    # Wyjściowy plik (bezpieczne rozszerzenia)
+    ext = (ext or "mp4").lower()
+    if ext not in ("mp4", "ts", "mkv", "webm"):
+        ext = "mp4"
+
+    # Nazwa wyjściowa (bez tytułu – nie mamy metadanych tutaj); użyj czasu
+    fname = time.strftime("twitch_%Y%m%d_%H%M%S") + f".{ext}"
+    out_tmp = str(temp_dir / fname)
+    out_final = out_dir / fname
+
+    # Oblicz -t lub -to
+    ss_args: List[str] = []
+    dur_args: List[str] = []
+    try:
+        if start_sec and start_sec > 0:
+            ss_args = ["-ss", str(float(start_sec))]
+        if end_sec and (not start_sec or end_sec > start_sec):
+            # użyj -to jako bezwzględnego końca względem wejścia po -ss
+            if start_sec and start_sec > 0:
+                dur_args = ["-t", str(float(end_sec - start_sec))]
+            else:
+                dur_args = ["-to", str(float(end_sec))]
+    except Exception:
+        ss_args, dur_args = [], []
+
+    # Format wyjściowy / muxer
+    mux_map = {
+        "mp4": "mp4",
+        "ts": "mpegts",
+        "mkv": "matroska",
+        "webm": "webm",
+    }
+    mux = mux_map.get(ext, "mp4")
+
+    # ffmpeg komenda (kopiowanie strumieni i retry)
+    cmd = [
+        shutil.which("ffmpeg") or "ffmpeg",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-y",
+        # retry & reconnect
+        "-reconnect", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_on_network_error", "1",
+        "-reconnect_at_eof", "1",
+        # próbuj ponawiać co 1 s
+        "-reconnect_delay_max", "1",
+        "-rw_timeout", "5000000",  # 5s w us
+    ] + ss_args + [
+        "-i", m3u8_url,
+    ] + dur_args + [
+        "-c", "copy",
+        "-f", mux,
+        out_tmp,
+        "-progress", "pipe:1",
+        "-nostats",
+    ]
+
+    print("[twitch] cmd:", " ".join(cmd))
+
+    job = jobs[job_id]
+    q = progress_queues.setdefault(job_id, asyncio.Queue())
+    loop = asyncio.get_running_loop()
+
+    # Uruchom jedną instancję ffmpeg i dołóż watchdog stanu połączenia:
+    if job.cancel:
+        return
+
+    done_fut: asyncio.Future = loop.create_future()
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        universal_newlines=True,
+        bufsize=1,
+    )
+    job.proc = proc
+
+    # Całkowita długość na potrzeby % (na podstawie end_sec-start_sec, jeśli podano)
+    total_dur = None
+    if start_sec is not None and end_sec is not None and end_sec > start_sec:
+        total_dur = max(0.0, float(end_sec - start_sec))
+
+    # Wspólny stan do watchdog'a
+    last_out_time_val = 0.0  # w sekundach
+    last_advance_mono = time.monotonic()
+    retrying_ui = False
+    attempts = 0
+    watchdog_stop = asyncio.Event()
+
+    def reader():
+        nonlocal last_out_time_val, last_advance_mono
+        try:
+            if proc.stdout is None:
+                rc = proc.wait()
+                loop.call_soon_threadsafe(done_fut.set_result, rc)
+                return
+            state: Dict[str, str] = {}
+            for line in proc.stdout:
+                line = (line or "").strip()
+                if not line:
+                    continue
+                # # Debug: surowe wyjście ffmpeg (pomaga zdiagnozować problemy z reconnect)
+                # try:
+                #     print(f"[ffmpeg raw][{job_id}] {line}")
+                # except Exception:
+                #     print("[ffmpeg raw] <unable to format line>")
+                if "=" not in line:
+                    print("[ffmpeg]", line)
+                    continue
+                k, v = line.split("=", 1)
+                state[k] = v
+                if k == "out_time_ms":
+                    try:
+                        new_time = float(v) / 1_000_000.0
+                        if new_time > last_out_time_val + 1e-6:
+                            last_out_time_val = new_time
+                            last_advance_mono = time.monotonic()
+                    except Exception:
+                        pass
+                if k == "progress" and v in ("continue", "end"):
+                    downloaded = state.get("total_size")
+                    try:
+                        downloaded_b = int(downloaded) if downloaded else 0
+                    except Exception:
+                        downloaded_b = 0
+                    percent = 0.0
+                    eta = "--:--:--"
+                    if total_dur and total_dur > 0:
+                        p = min(100.0, max(0.0, (last_out_time_val / total_dur) * 100.0))
+                        percent = p
+                        elapsed = last_out_time_val
+                        remain = max(0.0, total_dur - elapsed)
+                        eta = time.strftime("%H:%M:%S", time.gmtime(remain))
+                    payload = {
+                        "type": "progress" if v == "continue" else "done",
+                        "job_id": job_id,
+                        "percent": percent,
+                        "eta": eta,
+                        "size": "?",
+                        "downloaded": human_size(downloaded_b) if downloaded_b else "0B",
+                        "speed": state.get("speed", "Unknown"),
+                    }
+                    loop.call_soon_threadsafe(q.put_nowait, payload)
+            rc = proc.wait()
+            loop.call_soon_threadsafe(done_fut.set_result, rc)
+        except Exception as e:
+            print("[twitch reader] exception:", e)
+            loop.call_soon_threadsafe(done_fut.set_result, -1)
+
+    async def watchdog():
+        nonlocal retrying_ui, attempts
+        try:
+            while not watchdog_stop.is_set():
+                await asyncio.sleep(1)
+                if job.cancel or proc.poll() is not None:
+                    break
+                since = time.monotonic() - last_advance_mono
+                if since >= 5:
+                    if not retrying_ui:
+                        retrying_ui = True
+                        attempts = 0
+                        await q.put({"type": "retrying", "job_id": job_id})
+                    else:
+                        attempts += 1
+                        if attempts >= 30:
+                            # Brak postępu przez 5s + 30 prób co 1s – przerwij i pozwól ścieżce błędu zadziałać
+                            try:
+                                proc.terminate()
+                            except Exception:
+                                pass
+                            break
+                else:
+                    # Wznowiono postęp – powrót do normalnego stanu UI
+                    if retrying_ui:
+                        retrying_ui = False
+                        attempts = 0
+                        await q.put({"type": "resumed", "job_id": job_id})
+        finally:
+            watchdog_stop.set()
+
+    t = threading.Thread(target=reader, daemon=True)
+    t.start()
+    wd_task = asyncio.create_task(watchdog())
+
+    rc = await done_fut
+    watchdog_stop.set()
+    with contextlib.suppress(Exception):
+        await wd_task
+    job.proc = None
+
+    if rc == 0 and not job.cancel:
+        # sukces
+        try:
+            if Path(out_tmp).exists():
+                dest = out_final
+                if dest.exists():
+                    base = dest.stem
+                    suf = dest.suffix
+                    i = 1
+                    while True:
+                        cand = out_dir / f"{base} ({i}){suf}"
+                        if not cand.exists():
+                            dest = cand
+                            break
+                        i += 1
+                shutil.move(out_tmp, dest)
+        except Exception as e:
+            print("[twitch] move error:", e)
+        finally:
+            try:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception:
+                pass
+        await q.put({"type": "done", "job_id": job_id, "final": True})
+    elif job.cancel:
+        try:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        except Exception:
+            pass
+        await q.put({"type": "cancelled", "job_id": job_id, "final": True})
+    else:
+        # błąd po nieudanych próbach wznowienia
+        try:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        except Exception:
+            pass
+        await q.put({"type": "error", "job_id": job_id, "final": True})
+
+
+@app.post("/api/twitch/download")
+async def twitch_download(data: TwitchDownloadRequest):
+    m3u8_url = data.m3u8_url.strip()
+    if not m3u8_url:
+        raise HTTPException(400, "m3u8_url jest wymagany")
+
+    dl_dir = Path(data.download_dir).expanduser().resolve() if data.download_dir else DEFAULT_DOWNLOAD_DIR
+
+    job_id = uuid.uuid4().hex
+    jobs[job_id] = Job(id=job_id)
+
+    if DOWNLOAD_QUEUE is None:
+        raise HTTPException(500, "Kolejka pobierania nie została zainicjalizowana")
+
+    # W tej implementacji zadanie Twitch uruchamiane jest natychmiast (nie przez yt-dlp),
+    # ale wciąż używamy tej samej kolejki dla spójności.
+    q = progress_queues.setdefault(job_id, asyncio.Queue())
+    await q.put({"type": "queued", "job_id": job_id})
+
+    async def _runner():
+        try:
+            await run_download_twitch(job_id, m3u8_url, dl_dir, data.ext, data.start_sec, data.end_sec)
+        except Exception as e:
+            q = progress_queues.setdefault(job_id, asyncio.Queue())
+            await q.put({"type": "error", "job_id": job_id, "final": True, "message": str(e)})
+
+    # Włóż do kolejki jako callable, by zachować sekwencyjność z YouTube (kolejka ogólna)
+    class _CallableTask:
+        def __init__(self, job_id: str):
+            self.job_id = job_id
+    # Wstawiamy do kolejki lekko-hackowo: umieszczenie DownloadTask z url=m3u8 i fmt "twitch" nie pasuje,
+    # dlatego odpalimy osobny worker tu lokalnie bez kolizji z yt-dlp.
+    # Prościej: uruchom bezpośrednio jako osobne zadanie (poza kolejką), ale mamy już queue dla komunikatu 'queued'.
+    asyncio.create_task(_runner())
+
+    return {"job_id": job_id}

@@ -38,6 +38,8 @@ body{
 .input-card .field{display:flex;flex-direction:column;gap:6px;margin-bottom:10px}
 .input-card label{font-size:12px;color:var(--muted)}
 .input-card input{width:100%;padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.12);background:#0c141e;color:var(--text);outline:none}
+.input-card select{width:100%;padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.12);background:#0c141e;color:var(--text);outline:none}
+.input-card input[type="range"]{width:100%}
 .input-card input:focus{border-color:rgba(110,168,254,.6);box-shadow:0 0 0 4px rgba(110,168,254,.08)}
 .hint{font-size:12px;color:var(--muted)}
 
@@ -92,4 +94,24 @@ body{
 @media (max-width:520px){
   .item{grid-template-columns:84px 1fr}
   .thumb{width:84px;height:48px}
+}
+
+/* tab panels */
+.tab-panel{display:none}
+.tab-panel.active{display:block}
+
+.range-wrap{display:flex;flex-direction:column;gap:6px}
+.range-row{display:grid;grid-template-columns:1fr;gap:8px;align-items:center}
+.range-dual{position:relative;height:36px;display:flex;align-items:center}
+.range-track{position:absolute;left:0;right:0;top:50%;transform:translateY(-50%);height:4px;background:#152235;border-radius:999px}
+.range-fill{position:absolute;top:50%;transform:translateY(-50%);height:4px;background:linear-gradient(90deg,var(--accent),var(--accent2));border-radius:999px}
+.range-dual input[type="range"]{position:absolute;left:0;right:0;width:100%;height:36px;pointer-events:none;background:transparent;appearance:none;margin:0}
+.range-dual input[type="range"]::-webkit-slider-thumb{appearance:none;width:16px;height:16px;border-radius:50%;background:#e6f0ff;border:2px solid #6ea8fe;box-shadow:0 2px 6px rgba(0,0,0,.4);pointer-events:auto;margin-top:-6px}
+.range-dual input[type="range"]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;background:#e6f0ff;border:2px solid #6ea8fe;box-shadow:0 2px 6px rgba(0,0,0,.4);pointer-events:auto}
+.range-dual input[type="range"]::-webkit-slider-runnable-track{height:4px;background:transparent}
+.range-dual input[type="range"]::-moz-range-track{height:4px;background:transparent}
+.range-labels{display:flex;justify-content:space-between;font-size:12px;color:var(--muted)}
+
+.tw-format-table th, .tw-format-table td {
+    width: 50%;
 }
