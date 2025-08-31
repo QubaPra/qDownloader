@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>qDownloader</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <h1>qDownloader</h1>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="yt">
+        <span class="icon">▶</span>
+        <span>YouTube</span>
+      </button>
+      <button class="tab" data-tab="twitch" disabled>
+        <span class="icon">☁</span>
+        <span>Twitch (wkrótce)</span>
+      </button>
+    </nav>
+
+    <main>
+      <section id="tab-yt" class="tab-panel active">
+        <div class="card input-card">
+          <div class="field">
+            <label>Folder zapisu (opcjonalnie)</label>
+            <input id="pathInput" type="text" placeholder="np. D:\\Video\\YT lub pozostaw puste" />
+          </div>
+          <div class="field">
+            <label>URL filmu YouTube</label>
+            <input id="urlInput" type="url" placeholder="Wklej URL..." />
+          </div>
+        </div>
+
+        <div id="queue"></div>
+      </section>
+    </main>
+  </div>
+
+  <div id="spinner" class="global-spinner hidden">
+    <div class="loader"></div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
