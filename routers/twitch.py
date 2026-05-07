@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 
 import requests
+import httpx
 from fastapi import APIRouter, HTTPException
 
 import core.state
@@ -47,18 +48,24 @@ def _http_get(url: str, headers: Optional[Dict[str, str]] = None, timeout: float
     response.raise_for_status()
     return response.content
 
-def _http_head_ok(url: str, timeout: float = 10, retries: int = 2) -> bool:
+async def _http_head_ok(url: str, timeout: float = 10, retries: int = 2) -> bool:
+    """Asynchronously check if URL returns OK status"""
     for attempt in range(retries):
         try:
-            return 200 <= requests.head(url, headers=DEFAULT_HEADERS, timeout=timeout, allow_redirects=True).status_code < 400
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+                response = await client.head(url, headers=DEFAULT_HEADERS)
+                return 200 <= response.status_code < 400
         except Exception:
             if attempt < retries - 1:
-                time.sleep(0.5)
+                await asyncio.sleep(0.5)
                 continue
             try:
                 hdrs = {**DEFAULT_HEADERS, "Range": "bytes=0-1"}
-                return 200 <= requests.get(url, headers=hdrs, timeout=timeout, allow_redirects=True).status_code < 500
-            except Exception: return False
+                async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+                    response = await client.get(url, headers=hdrs)
+                    return 200 <= response.status_code < 500
+            except Exception:
+                return False
     return False
 
 def _extract_meta_from_html(html: str) -> Dict[str, Optional[str]]:
@@ -113,11 +120,13 @@ def _extract_vod_id_from_m3u8(m3u8_url: str) -> Optional[str]:
     except Exception: pass
     return None
 
-def _extract_frame_from_m3u8_segment(m3u8_url: str, base_m3u8: str) -> Optional[str]:
+async def _extract_frame_from_m3u8_segment(m3u8_url: str, base_m3u8: str) -> Optional[str]:
     """Extract first frame from m3u8 segment as base64 thumbnail"""
     try:
         import base64, tempfile
-        playlist = requests.get(m3u8_url, headers={"Accept": "application/vnd.apple.mpegurl"}).content.decode("utf-8", "ignore")
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(m3u8_url, headers={"Accept": "application/vnd.apple.mpegurl"})
+            playlist = response.text
         lines = [l.strip() for l in playlist.splitlines() if l.strip() and not l.startswith("#")]
         if not lines:
             return None
@@ -125,26 +134,36 @@ def _extract_frame_from_m3u8_segment(m3u8_url: str, base_m3u8: str) -> Optional[
         base_url = f"{parsed_url.scheme}://{parsed_url.netloc}{'/'.join(parsed_url.path.split('/')[:-1])}/"
         segment_url = lines[0] if lines[0].startswith("http") else base_url + lines[0]
 
-        with tempfile.NamedTemporaryFile(suffix=".ts", delete=False) as tmp_seg:
-            tmp_seg.write(requests.get(segment_url, timeout=10).content)
-            tmp_seg_path = tmp_seg.name
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(segment_url)
+            segment_data = response.content
 
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_jpg:
-            tmp_jpg_path = tmp_jpg.name
+        # Operacje dyskowe w wątku
+        def _write_and_extract():
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix=".ts", delete=False) as tmp_seg:
+                tmp_seg.write(segment_data)
+                tmp_seg_path = tmp_seg.name
 
-        try:
-            cmd = [shutil.which("ffmpeg") or "ffmpeg", "-y", "-i", tmp_seg_path, "-vframes", "1", "-q:v", "5", tmp_jpg_path]
-            subprocess.run(cmd, capture_output=True, timeout=5, check=False)
-            if Path(tmp_jpg_path).exists() and Path(tmp_jpg_path).stat().st_size > 0:
-                with open(tmp_jpg_path, "rb") as f:
-                    return f"data:image/jpeg;base64,{base64.b64encode(f.read()).decode()}"
-        finally:
-            Path(tmp_seg_path).unlink(missing_ok=True)
-            Path(tmp_jpg_path).unlink(missing_ok=True)
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_jpg:
+                tmp_jpg_path = tmp_jpg.name
+
+            try:
+                cmd = [shutil.which("ffmpeg") or "ffmpeg", "-y", "-i", tmp_seg_path, "-vframes", "1", "-q:v", "5", tmp_jpg_path]
+                subprocess.run(cmd, capture_output=True, timeout=5, check=False)
+                if Path(tmp_jpg_path).exists() and Path(tmp_jpg_path).stat().st_size > 0:
+                    with open(tmp_jpg_path, "rb") as f:
+                        return f"data:image/jpeg;base64,{base64.b64encode(f.read()).decode()}"
+            finally:
+                Path(tmp_seg_path).unlink(missing_ok=True)
+                Path(tmp_jpg_path).unlink(missing_ok=True)
+            return None
+
+        return await asyncio.to_thread(_write_and_extract)
     except Exception: pass
     return None
 
-def _create_storyboard_gif(scheme: str, netloc: str, folder: str, vod_id: str) -> Optional[str]:
+async def _create_storyboard_gif(scheme: str, netloc: str, folder: str, vod_id: str) -> Optional[str]:
     """Create animated GIF from storyboard grid (5 columns, frame height ~90px)"""
     try:
         import base64, tempfile, io
@@ -152,64 +171,73 @@ def _create_storyboard_gif(scheme: str, netloc: str, folder: str, vod_id: str) -
 
         # Pobierz grid (jeden plik ze wszystkimi klatkami)
         storyboard_url = f"{scheme}://{netloc}/{folder}/storyboards/{vod_id}-low-0.jpg"
-        resp = requests.get(storyboard_url, timeout=10)
-        if resp.status_code != 200:
-            return None
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(storyboard_url)
+            if resp.status_code != 200:
+                return None
+            grid_data = resp.content
 
-        grid_img = Image.open(io.BytesIO(resp.content))
-        grid_width, grid_height = grid_img.size
+        # Wszystkie operacje z plikami i obrazami w osobnym wątku
+        def _process_grid():
+            import base64, tempfile, io
+            from PIL import Image
+            
+            grid_img = Image.open(io.BytesIO(grid_data))
+            grid_width, grid_height = grid_img.size
 
-        # Grid ma 5 kolumn
-        cols = 5
-        frame_width = grid_width // cols
-        frame_height = frame_width * 9 // 16  # Aspect ratio 16:9 (standardowy dla Twitcha)
+            # Grid ma 5 kolumn
+            cols = 5
+            frame_width = grid_width // cols
+            frame_height = frame_width * 9 // 16  # Aspect ratio 16:9 (standardowy dla Twitcha)
 
-        rows = (grid_height + frame_height - 1) // frame_height  # Zaokrągli w górę
-        frames = []
+            rows = (grid_height + frame_height - 1) // frame_height  # Zaokrągli w górę
+            frames = []
 
-        # Rozpakuj klatki ze gridu
-        for row in range(rows):
-            for col in range(cols):
-                left = col * frame_width
-                top = row * frame_height
-                right = left + frame_width
-                bottom = top + frame_height
+            # Rozpakuj klatki ze gridu
+            for row in range(rows):
+                for col in range(cols):
+                    left = col * frame_width
+                    top = row * frame_height
+                    right = left + frame_width
+                    bottom = top + frame_height
 
-                # Sprawdź granice
-                if right <= grid_width and bottom <= grid_height:
-                    frame = grid_img.crop((left, top, right, bottom))
-                    frames.append(frame)
-                elif top < grid_height and left < grid_width:
-                    # Ostatnia klatka może być obcięta
-                    frame = grid_img.crop((left, top, min(right, grid_width), min(bottom, grid_height)))
-                    frames.append(frame)
+                    # Sprawdź granice
+                    if right <= grid_width and bottom <= grid_height:
+                        frame = grid_img.crop((left, top, right, bottom))
+                        frames.append(frame)
+                    elif top < grid_height and left < grid_width:
+                        # Ostatnia klatka może być obcięta
+                        frame = grid_img.crop((left, top, min(right, grid_width), min(bottom, grid_height)))
+                        frames.append(frame)
 
-        if not frames:
-            return None
+            if not frames:
+                return None
 
-        if len(frames) == 1:
-            # Jeśli tylko jedna klatka, zwróć JPG zamiast GIF
-            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-                frames[0].save(tmp.name, "JPEG")
-                with open(tmp.name, "rb") as f:
-                    result = f"data:image/jpeg;base64,{base64.b64encode(f.read()).decode()}"
-                Path(tmp.name).unlink(missing_ok=True)
-                return result
+            if len(frames) == 1:
+                # Jeśli tylko jedna klatka, zwróć JPG zamiast GIF
+                with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+                    frames[0].save(tmp.name, "JPEG")
+                    with open(tmp.name, "rb") as f:
+                        result = f"data:image/jpeg;base64,{base64.b64encode(f.read()).decode()}"
+                    Path(tmp.name).unlink(missing_ok=True)
+                    return result
 
-        # Utwórz animowany GIF (0.5 sekundy per klatka = 500ms)
-        with tempfile.NamedTemporaryFile(suffix=".gif", delete=False) as tmp_gif:
-            tmp_gif_path = tmp_gif.name
+            # Utwórz animowany GIF (0.5 sekundy per klatka = 500ms)
+            with tempfile.NamedTemporaryFile(suffix=".gif", delete=False) as tmp_gif:
+                tmp_gif_path = tmp_gif.name
 
-        try:
-            frames[0].save(tmp_gif_path, save_all=True, append_images=frames[1:], duration=500, loop=0)
-            with open(tmp_gif_path, "rb") as f:
-                return f"data:image/gif;base64,{base64.b64encode(f.read()).decode()}"
-        finally:
-            Path(tmp_gif_path).unlink(missing_ok=True)
+            try:
+                frames[0].save(tmp_gif_path, save_all=True, append_images=frames[1:], duration=500, loop=0)
+                with open(tmp_gif_path, "rb") as f:
+                    return f"data:image/gif;base64,{base64.b64encode(f.read()).decode()}"
+            finally:
+                Path(tmp_gif_path).unlink(missing_ok=True)
+
+        return await asyncio.to_thread(_process_grid)
     except Exception: pass
     return None
 
-def _get_twitch_metadata_via_gql(video_id: str) -> Optional[Dict[str, Any]]:
+async def _get_twitch_metadata_via_gql(video_id: str) -> Optional[Dict[str, Any]]:
     try:
         query = {
             "operationName": "VideoMetadata",
@@ -217,9 +245,10 @@ def _get_twitch_metadata_via_gql(video_id: str) -> Optional[Dict[str, Any]]:
             "query": "query VideoMetadata($videoID: ID!) { video(id: $videoID) { title, creator { login }, previewThumbnailURL(width:1280,height:720), createdAt, lengthSeconds, seekPreviewsURL } }"
         }
         headers = {"Client-Id": "kimne78kx3ncx6brgo4mv6wki5h1ko", "Content-Type": "application/json"}
-        response = requests.post("https://gql.twitch.tv/gql", json=[query], headers=headers, timeout=10)
-        response.raise_for_status()
-        data = response.json()[0].get("data", {}).get("video")
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.post("https://gql.twitch.tv/gql", json=[query], headers=headers)
+            response.raise_for_status()
+            data = response.json()[0].get("data", {}).get("video")
         if not data:
             return None
 
@@ -271,7 +300,7 @@ async def twitch_resolve(data: TwitchResolveRequest):
     if not base_m3u8:
         video_id = _extract_video_id_from_url(url)
         if video_id:
-            gql_meta = _get_twitch_metadata_via_gql(video_id)
+            gql_meta = await _get_twitch_metadata_via_gql(video_id)
             if gql_meta:
                 base_m3u8 = gql_meta.get("base_m3u8")
                 meta.update({
@@ -284,7 +313,10 @@ async def twitch_resolve(data: TwitchResolveRequest):
 
         if not meta.get("title"):
             try:
-                meta_html = _extract_meta_from_html(requests.get(url, headers=DEFAULT_HEADERS).content.decode("utf-8", "ignore"))
+                async with httpx.AsyncClient(timeout=30) as client:
+                    response = await client.get(url, headers=DEFAULT_HEADERS)
+                    html = response.text
+                meta_html = _extract_meta_from_html(html)
                 # Only update if useful HTML metadata is found (prevent "Twitch" overwrites)
                 if meta_html.get("title") and meta_html["title"].lower() != "twitch":
                     meta.update({k: meta_html.get(k) for k in meta if meta_html.get(k)})
@@ -305,7 +337,7 @@ async def twitch_resolve(data: TwitchResolveRequest):
         meta['title'] = timestamp_title
         if direct_m3u8_username:
             meta['channel'] = direct_m3u8_username
-        thumb = _extract_frame_from_m3u8_segment(base_m3u8, base_m3u8)
+        thumb = await _extract_frame_from_m3u8_segment(base_m3u8, base_m3u8)
         if thumb:
             meta['thumbnail'] = thumb
     else:
@@ -315,11 +347,14 @@ async def twitch_resolve(data: TwitchResolveRequest):
             parsed = urlparse(base_m3u8)
             path_parts = parsed.path.split('/')
             folder = path_parts[1] if len(path_parts) > 1 else ''
-            gif_data = _create_storyboard_gif(parsed.scheme, parsed.netloc, folder, video_id)
+            gif_data = await _create_storyboard_gif(parsed.scheme, parsed.netloc, folder, video_id)
             if gif_data:
                 meta['thumbnail'] = gif_data
 
-    try: duration_sec = _parse_m3u8_duration(requests.get(base_m3u8, headers={'Accept': 'application/vnd.apple.mpegurl'}).content.decode('utf-8', 'ignore'))
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.get(base_m3u8, headers={'Accept': 'application/vnd.apple.mpegurl'})
+            duration_sec = _parse_m3u8_duration(response.text)
     except Exception: pass
 
     qualities = ["1080p60", "1080p30", "720p60", "720p30", "480p30", "360p30", "160p30", "chunked"]
@@ -327,7 +362,7 @@ async def twitch_resolve(data: TwitchResolveRequest):
     for q in qualities:
         u = base_m3u8 if q == "chunked" else base_m3u8.replace("chunked", q)
         lbl = "1080p60" if q == "chunked" else q
-        if lbl not in seen_labels and _http_head_ok(u):
+        if lbl not in seen_labels and await _http_head_ok(u):
             seen_labels.add(lbl)
             est = _estimate_size_bytes(lbl, duration_sec)
             available.append({"label": lbl, "m3u8": u, "size_est": human_size(est) if est else "-"})

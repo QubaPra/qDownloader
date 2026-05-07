@@ -465,31 +465,136 @@ function renderTwQualities(card, qualities, meta, original_url){
   formatsEl.appendChild(table);
 }
 
-async function twitchResolve(url, cachedData = null){
-  showSpinner(true);
-  try{
-    let data = cachedData;
-    if (!data) {
-      const r = await fetch('/api/twitch/resolve', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ url }) });
-      if(!r.ok) throw new Error('Błąd rozwiązywania Twitch');
-      data = await r.json();
+function stripLargeStateData(data){
+  if (!data || typeof data !== 'object') return data;
+  const copy = Array.isArray(data) ? data.slice() : {...data};
+
+  if (!Array.isArray(copy) && typeof copy.thumbnail === 'string') {
+    if (copy.thumbnail.startsWith('data:') || copy.thumbnail.length > 4096) {
+      delete copy.thumbnail;
+    }
+  }
+
+  if (!Array.isArray(copy) && copy.meta && typeof copy.meta === 'object' && typeof copy.meta.thumbnail === 'string') {
+    if (copy.meta.thumbnail.startsWith('data:') || copy.meta.thumbnail.length > 4096) {
+      copy.meta = {...copy.meta};
+      delete copy.meta.thumbnail;
+    }
+  }
+
+  return copy;
+}
+
+function isStorageQuotaError(err){
+  return !!err && (
+    err.name === 'QuotaExceededError' ||
+    err.name === 'NS_ERROR_DOM_QUOTA_REACHED' ||
+    /quota/i.test(err.message || '')
+  );
+}
+
+const ThumbnailCache = (() => {
+  const DB_NAME = 'qdownloader-cache';
+  const DB_VERSION = 1;
+  const STORE_NAME = 'thumbnails';
+  let dbPromise = null;
+
+  function openDb(){
+    if (dbPromise) return dbPromise;
+    if (!('indexedDB' in window)) {
+      dbPromise = Promise.resolve(null);
+      return dbPromise;
     }
 
-    const card = createItemCard({
-      title: data.title,
-      channel: data.channel,
-      duration: data.duration,
-      thumbnail: data.thumbnail,
+    dbPromise = new Promise((resolve) => {
+      const request = indexedDB.open(DB_NAME, DB_VERSION);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(STORE_NAME)) {
+          db.createObjectStore(STORE_NAME, { keyPath: 'url' });
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => resolve(null);
+      request.onblocked = () => resolve(null);
     });
-    // Przechowaj title i release_date jako dataset do późniejszego użycia
-    card.dataset.twitchTitle = data.title || '';
-    card.dataset.twitchReleaseDate = data.release_date || '';
-    card.dataset.url = url;
-    twResults.prepend(card);
-    if (typeof UIState !== 'undefined') UIState.add(url, 'twitch', data);
 
-    // render dual-handle slider nad tabelą jakości
-    const dur = Number(data.duration||0);
+    return dbPromise;
+  }
+
+  async function withStore(mode, fn){
+    const db = await openDb();
+    if (!db) return null;
+    return await new Promise((resolve) => {
+      const tx = db.transaction(STORE_NAME, mode);
+      const store = tx.objectStore(STORE_NAME);
+      let result;
+      try {
+        result = fn(store, resolve);
+      } catch (err) {
+        resolve(null);
+        return;
+      }
+      tx.oncomplete = () => resolve(result ?? null);
+      tx.onerror = () => resolve(null);
+      tx.onabort = () => resolve(null);
+    });
+  }
+
+  function normalizeThumbnail(value){
+    if (!value || typeof value !== 'string') return null;
+    return value;
+  }
+
+  return {
+    async get(url){
+      return await withStore('readonly', (store, resolve) => {
+        const request = store.get(url);
+        request.onsuccess = () => resolve(normalizeThumbnail(request.result?.thumbnail));
+        request.onerror = () => resolve(null);
+      });
+    },
+    async set(url, thumbnail){
+      const safeThumbnail = normalizeThumbnail(thumbnail);
+      if (!safeThumbnail) return null;
+      return await withStore('readwrite', (store) => {
+        store.put({ url, thumbnail: safeThumbnail, updatedAt: Date.now() });
+      });
+    },
+    async delete(url){
+      if (!url) return null;
+      return await withStore('readwrite', (store) => {
+        try { store.delete(url); } catch (e) { /* ignore */ }
+      });
+    }
+  };
+})();
+
+async function getCachedThumbnail(url){
+  return await ThumbnailCache.get(url);
+}
+
+async function applyCachedThumbnail(card, url){
+  const thumb = $('.thumb', card);
+  if (!thumb || thumb.querySelector('img')) return;
+  const cached = await getCachedThumbnail(url);
+  if (!cached || !card.isConnected) return;
+  thumb.innerHTML = `<img src="${cached}" alt="thumb" onerror="this.style.display='none';this.parentElement.style.display='none';"/>`;
+}
+
+function buildTwitchCard(data, url){
+  const card = createItemCard({
+    title: data.title,
+    channel: data.channel,
+    duration: data.duration,
+    thumbnail: data.thumbnail,
+  });
+  card.dataset.twitchTitle = data.title || '';
+  card.dataset.twitchReleaseDate = data.release_date || '';
+  card.dataset.url = url;
+
+  // render dual-handle slider nad tabelą jakości
+  const dur = Number(data.duration||0);
     const formatsEl = $('.formats', card);
     const sliderWrap = document.createElement('div');
     sliderWrap.className = 'range-wrap';
@@ -593,7 +698,59 @@ async function twitchResolve(url, cachedData = null){
     renderTwQualities(card, data.qualities||[], data, url);
     // Pierwsze przeliczenie rozmiarów dla domyślnego zakresu
     updateTwTableSizes();
-  } finally{ showSpinner(false); }
+    if (!data.thumbnail) {
+      applyCachedThumbnail(card, url).catch(console.error);
+    } else {
+      ThumbnailCache.set(url, data.thumbnail).catch(console.error);
+    }
+  return card;
+}
+
+async function hydrateTwitchCard(url, card){
+  const r = await fetch('/api/twitch/resolve', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ url }) });
+  if(!r.ok) return;
+  const data = await r.json();
+  if(!card.isConnected) return;
+
+  if (data.thumbnail) {
+    ThumbnailCache.set(url, data.thumbnail).catch(console.error);
+  }
+
+  const freshCard = buildTwitchCard(data, url);
+  card.replaceWith(freshCard);
+
+  if (typeof UIState !== 'undefined') UIState.add(url, 'twitch', data);
+}
+
+async function twitchResolve(url, cachedData = null, options = {}){
+  const useSpinner = !options.silent;
+  if (useSpinner) showSpinner(true);
+  try{
+    let data = cachedData;
+    if (!data) {
+      const r = await fetch('/api/twitch/resolve', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ url }) });
+      if(!r.ok) throw new Error('Błąd rozwiązywania Twitch');
+      data = await r.json();
+    }
+
+    let cachedThumbnail = null;
+    if (data && !data.thumbnail) {
+      cachedThumbnail = await getCachedThumbnail(url);
+      if (cachedThumbnail) {
+        data = { ...data, thumbnail: cachedThumbnail };
+      }
+    }
+
+    const card = buildTwitchCard(data, url);
+    twResults.prepend(card);
+    if (typeof UIState !== 'undefined') UIState.add(url, 'twitch', data);
+
+    if (cachedData && !cachedData.thumbnail && !cachedThumbnail) {
+      hydrateTwitchCard(url, card).catch(console.error);
+    }
+  } finally{
+    if (useSpinner) showSpinner(false);
+  }
 }
 
 twCheckBtn?.addEventListener('click', ()=>{
@@ -616,14 +773,48 @@ twCheckBtn?.addEventListener('click', ()=>{
 
 // ===== State Restoration =====
 const UIState = {
-  get urls() { return JSON.parse(localStorage.getItem('openedUrls') || '[]'); },
+  get urls() {
+    const raw = JSON.parse(localStorage.getItem('openedUrls') || '[]');
+    const normalized = raw.map(item => ({
+      ...item,
+      data: stripLargeStateData(item?.data),
+    }));
+
+    const needsRewrite = JSON.stringify(raw) !== JSON.stringify(normalized);
+    if (needsRewrite) {
+      this._save(normalized);
+    }
+
+    return normalized;
+  },
+  _save(items) {
+    let snapshot = items.map(item => ({
+      ...item,
+      data: stripLargeStateData(item?.data),
+    }));
+
+    while (true) {
+      try {
+        localStorage.setItem('openedUrls', JSON.stringify(snapshot));
+        return;
+      } catch (err) {
+        if (!isStorageQuotaError(err)) throw err;
+        if (!snapshot.length) {
+          console.warn('[UIState] Nie udało się zapisać openedUrls nawet po odchudzeniu danych');
+          return;
+        }
+        snapshot = snapshot.slice(0, -1);
+      }
+    }
+  },
   add(url, platform, data) {
      const all = this.urls.filter(x => x.url !== url);
-     all.unshift({url, platform, data});
-     localStorage.setItem('openedUrls', JSON.stringify(all));
+     all.unshift({url, platform, data: stripLargeStateData(data)});
+     this._save(all);
   },
   remove(url) {
-     localStorage.setItem('openedUrls', JSON.stringify(this.urls.filter(x => x.url !== url)));
+      this._save(this.urls.filter(x => x.url !== url));
+      try { ThumbnailCache.delete(url).catch(() => {}); } catch (e) {}
   }
 };
 
@@ -765,7 +956,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     for (const item of UIState.urls) {
         if (document.querySelector(`.card[data-url="${item.url}"]`)) continue;
         if (item.platform === 'twitch') {
-            if (typeof twitchResolve !== 'undefined') twitchResolve(item.url, item.data).catch(e => console.error(e));
+        if (typeof twitchResolve !== 'undefined') twitchResolve(item.url, item.data, { silent: true }).catch(e => console.error(e));
         } else {
             if (typeof fetchFormats !== 'undefined') fetchFormats(item.url, item.data).catch(e => console.error(e));
         }
