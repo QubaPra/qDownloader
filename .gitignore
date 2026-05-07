@@ -5,7 +5,5 @@ __pycache__/
 # VS Code settings
 .vscode/
 
-# Downloads folder: ignore contents but keep .gitkeep so empty folder is tracked
+# Downloads folder: ignore contents
 downloads/*
-!downloads/.gitkeep
-.vscode/
