@@ -27,17 +27,12 @@ uvicorn app:app --host 0.0.0.0 --port 8000 --reload
 ## Android (Termux)
 Po zrobieniu `git pull` na telefonie:
 
-1. Przejdź do katalogu projektu i uruchom setup:
-```
-bash termux_setup.sh
-```
-
-2. Zainstaluj globalną komendę w Termux:
+1. Zainstaluj globalną komendę w Termux:
 ```
 bash install_termux_command.sh
 ```
 
-3. Uruchamiaj aplikację jedną komendą:
+2. Uruchamiaj aplikację jedną komendą:
 ```
 qdownloader
 ```
@@ -45,14 +40,6 @@ qdownloader
 Co robi `qdownloader`:
 - startuje API (`uvicorn`) na porcie `8000`
 - automatycznie otwiera przeglądarkę pod `http://127.0.0.1:8000/`
-
-### Skrót na ekranie głównym (opcjonalnie)
-1. Uruchom:
-```
-bash install_termux_shortcut.sh
-```
-2. Zainstaluj aplikację `Termux:Widget`.
-3. Dodaj widget Termux na ekran główny i wybierz skrypt `qdownloader`.
 
 ### Konfigurowalne zmienne (opcjonalnie)
 Możesz ustawić przed startem:
