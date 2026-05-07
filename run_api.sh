@@ -1,0 +1,1 @@
+cd /storage/3430-6432/movies/qDownloader && { (sleep 2 && termux-open-url http://localhost:8000) & python -m uvicorn app:app --port 8000; }
