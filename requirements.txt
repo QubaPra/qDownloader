@@ -3,3 +3,5 @@ uvicorn[standard]
 yt-dlp
 pydantic
 jinja2
+requests
+Pillow

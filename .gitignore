@@ -1,0 +1,11 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+
+# VS Code settings
+.vscode/
+
+# Downloads folder: ignore contents but keep .gitkeep so empty folder is tracked
+downloads/*
+!downloads/.gitkeep
+.vscode/

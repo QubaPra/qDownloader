@@ -1,80 +1,112 @@
 <!DOCTYPE html>
-<html lang="pl">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
-  <title>qDownloader</title>
-  <link rel="stylesheet" href="/static/style.css" />
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
-</head>
-<body>
-  <div class="app">
-    <header class="topbar">
-      <h1>qDownloader</h1>
-    </header>
-
-    <nav class="tabs">
-      <button class="tab active" data-tab="yt">
-        <span class="icon">▶</span>
-        <span>YouTube</span>
-      </button>
-      <button class="tab" data-tab="twitch">
-        <span class="icon">☁</span>
-        <span>Twitch</span>
-      </button>
-    </nav>
-
-    <main>
-      <section id="tab-yt" class="tab-panel active">
-        <div class="card input-card">
-          <div class="field">
-            <label>Folder zapisu (opcjonalnie)</label>
-            <input id="pathInput" type="text" placeholder="np. D:\\Video\\YT lub pozostaw puste" />
-          </div>
-          <div class="field">
-            <label>URL filmu YouTube</label>
-            <input id="urlInput" type="url" placeholder="Wklej URL..." />
-          </div>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1"
+    />
+    <title>qDownloader</title>
+    <link rel="stylesheet" href="/static/style.css" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <h1>qDownloader</h1>
+        <div class="toggle-container">
+          <label class="toggle-switch">
+            <input type="checkbox" id="parallelToggle" checked />
+            <span class="slider"></span>
+          </label>
+          <span class="toggle-label">Parallel downloading</span>
         </div>
+      </header>
 
-        <div id="queue"></div>
-      </section>
+      <nav class="tabs">
+        <button class="tab active" data-tab="yt">
+          <span class="icon">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M21.582,6.186c-0.23,-0.86 -0.908,-1.538 -1.768,-1.768C18.254,4 12,4 12,4s-6.254,0 -7.814,0.418c-0.86,0.23 -1.538,0.908 -1.768,1.768C2,7.746 2,12 2,12s0,4.254 0.418,5.814c0.23,0.86 0.908,1.538 1.768,1.768C6.254,20 12,20 12,20s6.254,0 7.814,-0.418c0.86,-0.23 1.538,-0.908 1.768,-1.768C22,16.254 22,12 22,12s0,-4.254 -0.418,-5.814zM9.996,15.005l0,-6.01 l5.418,3.005l-5.418,3.005z"/></svg>
+          </span>
+          <span>YouTube</span>
+        </button>
+        <button class="tab" data-tab="twitch">
+          <span class="icon">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M11.571 4.714h1.715v5.143H11.57zm4.715 0H18v5.143h-1.714zM6 0L1.714 4.286v15.428h5.143V24l4.286-4.286h3.428L22.286 12V0zm14.571 11.143l-3.428 3.428h-3.429l-3 3v-3H6.857V1.714h13.714Z"/></svg>
+          </span>
+          <span>Twitch</span>
+        </button>
+      </nav>
 
-      <section id="tab-twitch" class="tab-panel">
-        <div class="card input-card">
-          <div class="field">
-            <label>Folder zapisu (opcjonalnie)</label>
-            <input id="twPathInput" type="text" placeholder="np. D:\\Video\\Twitch lub pozostaw puste" />
+      <main>
+        <section id="tab-yt" class="tab-panel active">
+          <div class="card input-card">
+            <div class="field">
+              <label>Save folder (optional)</label>
+              <input
+                id="pathInput"
+                type="text"
+                placeholder="e.g. D:\Video\YT or leave empty"
+              />
+            </div>
+            <div class="field">
+              <label>YouTube Video URL</label>
+              <input id="urlInput" type="url" placeholder="Paste URL..." />
+            </div>
           </div>
-          <div class="field">
-            <label>Format wyjściowy</label>
-            <select id="twExt">
-              <option value="mp4">mp4</option>
-              <option value="ts">ts</option>
-              <option value="webm">webm</option>
-              <option value="mkv">mkv</option>
-            </select>
-          </div>
-          <div class="field">
-            <label>URL VOD Twitch lub bezpośredni M3U8</label>
-            <input id="twUrl" type="url" placeholder="https://www.twitch.tv/videos/XXXXXXXX lub https://....index-dvr.m3u8" />
-          </div>
-          <div class="field">
-            <button id="twCheck" class="btn">Sprawdź dostępne jakości</button>
-          </div>
-        </div>
 
-        <div id="twResults"></div>
-      </section>
-    </main>
-  </div>
+          <div id="queue"></div>
+        </section>
 
-  <div id="spinner" class="global-spinner hidden">
-    <div class="loader"></div>
-  </div>
+        <section id="tab-twitch" class="tab-panel">
+          <div class="card input-card">
+            <div class="field-row">
+              <div class="field" style="flex: 2;">
+                <label>Save folder (optional)</label>
+                <input
+                  id="twPathInput"
+                  type="text"
+                  placeholder="e.g. D:\Video\Twitch or leave empty"
+                />
+              </div>
+              <div class="field" style="flex: 1;">
+                <label>Output format</label>
+                <div class="select-wrapper">
+                  <select id="twExt">
+                    <option value="ts">ts</option>
+                    <option value="mp4">mp4</option>
+                    <option value="webm">webm</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+            <div class="field">
+              <label>Twitch VOD URL or direct M3U8</label>
+              <input
+                id="twUrl"
+                type="url"
+                placeholder="https://www.twitch.tv/videos/XXXXXXXX or https://....index-dvr.m3u8"
+              />
+            </div>
+            <div class="field">
+              <button id="twCheck" class="btn">Check available qualities</button>
+            </div>
+          </div>
 
-  <script src="/static/app.js"></script>
-</body>
+          <div id="twResults"></div>
+        </section>
+      </main>
+    </div>
+
+    <div id="spinner" class="global-spinner hidden">
+      <div class="loader"></div>
+    </div>
+
+    <script src="/static/app.js?v=3"></script>
+  </body>
 </html>

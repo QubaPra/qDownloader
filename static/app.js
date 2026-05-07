@@ -58,7 +58,7 @@ function createItemCard(meta){
   el.className = 'card';
   el.innerHTML = `
     <div class="item">
-      <div class="thumb">${meta.thumbnail? `<img src="${meta.thumbnail}" alt="thumb"/>` : ''}</div>
+      <div class="thumb">${meta.thumbnail? `<img src="${meta.thumbnail}" alt="thumb" onerror="this.style.display='none';this.parentElement.style.display='none';"/>` : ''}</div>
       <div class="meta">
         <div class="title">${meta.title || ''}</div>
         <div class="row">
@@ -66,16 +66,33 @@ function createItemCard(meta){
           <div class="duration">${fmtHMS(meta.duration || 0)}</div>
         </div>
       </div>
-      <button class="close hidden" title="Anuluj">✕</button>
+      <button class="close" title="Close"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
   </div>
   <div class="formats"></div>
   `;
+
+  const closeBtn = el.querySelector('.close');
+  closeBtn.onclick = async () => {
+    const jobId = el.dataset.job;
+    const isDownloading = el.classList.contains('is-downloading');
+    if (isDownloading) {
+      const ok = confirm('Cancel download?');
+      if (!ok) return;
+    }
+    if (jobId) {
+      try { await fetch(`/api/cancel/${jobId}`, { method: 'DELETE' }); } catch (e) { console.error(e); }
+    }
+    const u = el.dataset.url;
+    if (u && typeof UIState !== 'undefined') UIState.remove(u);
+    el.remove();
+  };
+
   return el;
 }
 
 function renderFormats(el, formats){
   if(!formats || !formats.length){
-    el.innerHTML = '<div class="hint">Brak formatów video-only.</div>';
+    el.innerHTML = '<div class="hint">No video-only formats available.</div>';
     return;
   }
   const table = document.createElement('table');
@@ -86,7 +103,7 @@ function renderFormats(el, formats){
         <th>ext</th>
         <th>res</th>
         <th>bitrate</th>
-        <th>rozmiar</th>
+        <th>size</th>
         <th></th>
       </tr>
     </thead>
@@ -122,13 +139,13 @@ function renderProgress(el, infoText){
       <div class="progress-label">0%</div>
       <div class="progress-right">?</div>
     </div>
-  <div class="progress-meta"><span class="left">Pozostało: --:--:--</span><span class="center fmt">${infoText || ''}</span><span class="right">0 B/s</span></div>
+  <div class="progress-meta"><span class="left">ETA: --:--:--</span><span class="center fmt">${infoText || ''}</span><span class="right">0 B/s</span></div>
   `;
   el.appendChild(wrap);
   return wrap;
 }
 
-function startSSE(jobId, wrap){
+function startSSE(jobId, wrap, retryCb = null){
   const es = new EventSource(`/api/progress/${jobId}`);
   const fill = $('.progress-fill', wrap);
   const label = $('.progress-label', wrap);
@@ -157,7 +174,7 @@ function startSSE(jobId, wrap){
         lastEta = etaRaw;
       }
       const etaToShow = lastEta || '--:--:--';
-      left.textContent = `Pozostało: ${etaToShow}`;
+      left.textContent = `ETA: ${etaToShow}`;
       // Speed: użyj ostatniej znanej gdy przychodzi 'Unknown' (np. 'Unknown B/s')
       let speedRaw = msg.speed || '';
       const isSpeedUnknown = typeof speedRaw === 'string' && /unknown/i.test(speedRaw);
@@ -171,62 +188,130 @@ function startSSE(jobId, wrap){
     } else if(msg.type === 'queued'){
       // zadanie czeka w kolejce na start pobierania
       wrap.classList.add('progress-queued');
-      label.textContent = 'W kolejce…';
+      label.textContent = 'Queued...';
     } else if(msg.type === 'retrying'){
       // połączenie zrywa/ponawianie – oznacz żółtym paskiem
       wrap.classList.add('progress-retrying');
-      label.textContent = 'Ponawianie…';
+      label.textContent = 'Retrying...';
     } else if(msg.type === 'resumed'){
       // wznawianie – wróć do normalnego paska
       wrap.classList.remove('progress-retrying');
     } else if(msg.type === 'done'){
       wrap.classList.add('progress-success');
       fill.style.width = '100%';
-      label.textContent = 'Pobrano';
+      label.textContent = 'Done';
+      left.textContent = 'ETA: --:--:--';
+      right.textContent = '0 B/s';
+      inLeft.textContent = inRight.textContent;
       done = true;
       es.close();
+      const cardEl = wrap.closest('.card');
+      if(cardEl) cardEl.classList.remove('is-downloading');
     } else if(msg.type === 'cancelled'){
       wrap.classList.add('progress-cancelled');
-      label.textContent = 'Anulowano';
+      label.textContent = 'Cancelled';
       es.close();
+      const cardEl = wrap.closest('.card');
+      if(cardEl) cardEl.classList.remove('is-downloading');
       // Usuń tylko tę jedną kartę, nie cały kontener kolejki
       setTimeout(()=> wrap.closest('.card')?.remove(), 2000);
     } else if(msg.type === 'error'){
       wrap.classList.add('progress-cancelled');
-      label.textContent = 'Błąd';
+      label.textContent = 'Error';
       es.close();
+      const cardEl = wrap.closest('.card');
+      if(cardEl) cardEl.classList.remove('is-downloading');
+      done = true; // Fix removal bug
+
+      if(retryCb){
+        const actionsDiv = document.createElement('div');
+        actionsDiv.className = 'retry-actions';
+
+        const retryBtn = document.createElement('button');
+        retryBtn.className = 'retry-btn';
+        retryBtn.textContent = 'Try again';
+        retryBtn.onclick = () => {
+          actionsDiv.remove();
+          wrap.classList.remove('progress-cancelled');
+          label.textContent = '0%';
+          fill.style.width = '0%';
+          cardEl.classList.add('is-downloading');
+          done = false;
+          retryCb();
+        };
+        actionsDiv.appendChild(retryBtn);
+
+        // Resume Button
+        if (msg.last_time && msg.last_time > 15) {
+          const resumeBtn = document.createElement('button');
+          resumeBtn.className = 'retry-btn primary';
+          resumeBtn.textContent = 'Resume download';
+          resumeBtn.onclick = () => {
+            actionsDiv.remove();
+            wrap.classList.remove('progress-cancelled');
+            label.textContent = '0%';
+            fill.style.width = '0%';
+            cardEl.classList.add('is-downloading');
+            done = false;
+            // Send the last_time so the caller knows how much to offset
+            retryCb(msg.last_time);
+          };
+          actionsDiv.appendChild(resumeBtn);
+        }
+        wrap.appendChild(actionsDiv);
+      }
     }
   };
 
-  // Obsługa przycisku anulowania w nagłówku karty (widoczny po starcie pobierania)
+  // Handle cancel button in the card header
   const cardEl = wrap.closest('.card');
+  if (!cardEl) {
+    console.error('[startSSE] Could not find card element from progress wrap');
+    return;
+  }
   const closeBtn = $('.close', cardEl);
-  closeBtn?.addEventListener('click', async ()=>{
-    const isQueued = wrap.classList.contains('progress-queued');
-    if(!done && !isQueued){
-      const ok = confirm('Anulować pobieranie?');
-      if(!ok) return;
-    }
-    await fetch(`/api/cancel/${jobId}`, { method: 'DELETE' });
-    if(done || isQueued){
-      // Usuń tylko bieżącą kartę natychmiast, jeśli była w kolejce
+  if (closeBtn) {
+    closeBtn.onclick = async ()=>{
+      const isQueued = wrap.classList.contains('progress-queued');
+      if(!done && !isQueued){
+        const ok = confirm('Cancel download?');
+        if(!ok) return;
+      }
+      try{
+        console.log(`[startSSE] Requesting cancel/remove for job ${jobId}`);
+        await fetch(`/api/cancel/${jobId}`, { method: 'DELETE' });
+      }catch(e){
+        console.error('[startSSE] cancel request failed', e);
+      }
+      // Remove card and clear saved UI state for this URL
+      try{
+        const u = cardEl?.dataset?.url;
+        if(u && typeof UIState !== 'undefined') UIState.remove(u);
+      }catch(e){}
       cardEl?.remove();
-    }
-  });
+    };
+  } else {
+    console.error('[startSSE] Could not find close button in card');
+  }
 }
 
-async function fetchFormats(url){
+async function fetchFormats(url, cachedData = null){
   showSpinner(true);
   try{
-    const r = await fetch('/api/yt/formats', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ url }) });
-    if(!r.ok) throw new Error('Błąd pobierania formatów');
-    const data = await r.json();
+    let data = cachedData;
+    if (!data) {
+      const r = await fetch('/api/yt/formats', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ url }) });
+      if(!r.ok) throw new Error('Błąd pobierania formatów');
+      data = await r.json();
+    }
 
     const card = createItemCard(data);
+    card.dataset.url = url;
     const formatsEl = $('.formats', card);
     renderFormats(formatsEl, data.formats);
 
     queue.prepend(card);
+    if (typeof UIState !== 'undefined') UIState.add(url, 'youtube', data);
 
     // Clicks: kliknięcie w cały wiersz formatu
     $$('.format-row', card).forEach(tr=>{
@@ -240,15 +325,19 @@ async function fetchFormats(url){
         closeBtn?.classList.remove('hidden');
         // Zastąp tabelę formatek paskiem postępu w tym samym miejscu
         formatsEl.innerHTML = '';
+        card.classList.add('is-downloading');
         const info = `${res}${res && ext ? ' ' : ''}${ext ? '.'+ext : ''}`.trim();
         const progress = renderProgress(formatsEl, info);
-        const r2 = await fetch('/api/yt/download', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ url, format_id: fmt, download_dir }) });
-        if(!r2.ok){
-          $('.progress-label', progress).textContent = 'Błąd';
-          return;
-        }
-        const { job_id } = await r2.json();
-        startSSE(job_id, progress);
+        const doDownload = async () => {
+          const r2 = await fetch('/api/yt/download', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ url, format_id: fmt, download_dir, meta: data, info_text: info }) });
+          if(!r2.ok){
+            $('.progress-label', progress).textContent = 'Błąd';
+            return;
+          }
+          const { job_id } = await r2.json();
+          startSSE(job_id, progress, doDownload);
+        };
+        doDownload();
       });
     });
   } finally { showSpinner(false); }
@@ -257,10 +346,31 @@ async function fetchFormats(url){
 urlInput.addEventListener('input', (e)=>{
   const v = (e.target.value||'').trim();
   if(v.length > 10 && v.includes('http')){
+    const existing = $(`.card[data-url="${v}"]`);
+    if(existing) {
+      if(existing.classList.contains('is-downloading')) {
+        e.target.value = '';
+        return; // skip
+      } else {
+        existing.remove();
+      }
+    }
     fetchFormats(v).catch(console.error);
     e.target.value = '';
   }
 });
+
+// ===== Settings =====
+const parallelToggle = $('#parallelToggle');
+if(parallelToggle) {
+  parallelToggle.addEventListener('change', async (e) => {
+    await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ parallel: e.target.checked })
+    });
+  });
+}
 
 // ===== Tabs =====
 $$('.tab').forEach(btn=>{
@@ -270,11 +380,16 @@ $$('.tab').forEach(btn=>{
     const tab = btn.dataset.tab;
     $$('.tab-panel').forEach(p=>p.classList.remove('active'));
     $(`#tab-${tab}`)?.classList.add('active');
+
+    if (tab === 'twitch') document.body.classList.add('twitch-active');
+    else document.body.classList.remove('twitch-active');
+
+    localStorage.setItem('activeTab', tab);
   });
 });
 
 // ===== Twitch =====
-function renderTwQualities(card, qualities, baseMeta, params){
+function renderTwQualities(card, qualities, meta, original_url){
   const formatsEl = $('.formats', card);
   if(!qualities || !qualities.length){
     formatsEl.innerHTML = '<div class="hint">Brak dostępnych jakości.</div>';
@@ -285,8 +400,8 @@ function renderTwQualities(card, qualities, baseMeta, params){
   table.innerHTML = `
     <thead>
       <tr>
-        <th>res</th>
-        <th>rozmiar</th>
+        <th>Res</th>
+        <th>Size</th>
         <th></th>
       </tr>
     </thead>
@@ -305,7 +420,7 @@ function renderTwQualities(card, qualities, baseMeta, params){
     `;
     tr.addEventListener('click', async ()=>{
       const download_dir = twPathInput?.value?.trim() || null;
-      const ext = twExtSel?.value || 'mp4';
+      const ext = twExtSel?.value || 'ts';
       const slider = $('.range-dual', card);
       const startInput = $('input[data-role="start"]', slider);
       const endInput = $('input[data-role="end"]', slider);
@@ -314,20 +429,35 @@ function renderTwQualities(card, qualities, baseMeta, params){
       const max = Number(endInput?.max||0) || Number(startInput?.max||0) || 0;
       // prawa gałka na końcu = do końca
       const end_sec = (end_v >= max) ? null : end_v;
+      // Pobierz title i release_date z dataset karty
+      const title = card.dataset.twitchTitle || null;
+      const release_date = card.dataset.twitchReleaseDate || null;
       // show close button
       const closeBtn = $('.close', card);
       closeBtn?.classList.remove('hidden');
+
+      const sliderWrap = $('.range-wrap', card);
+      if(sliderWrap) sliderWrap.style.display = 'none';
+
       // replace table with progress
       formatsEl.innerHTML = '';
+      card.classList.add('is-downloading');
       const info = `${q.label} .${ext}`;
       const progress = renderProgress(formatsEl, info);
-      const r = await fetch('/api/twitch/download', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ m3u8_url: q.m3u8, download_dir, ext, start_sec, end_sec }) });
-      if(!r.ok){
-        $('.progress-label', progress).textContent = 'Błąd';
-        return;
-      }
-      const { job_id } = await r.json();
-      startSSE(job_id, progress);
+      const doDownload = async (resume_offset = 0) => {
+        let req_start_sec = start_sec;
+        if(resume_offset > 15) {
+          req_start_sec = Math.max(0, start_sec + resume_offset - 15);
+        }
+        const r = await fetch('/api/twitch/download', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ m3u8_url: q.m3u8, download_dir, ext, start_sec: req_start_sec, end_sec, title, release_date, meta: meta, original_url: original_url, info_text: info }) });
+        if(!r.ok){
+          $('.progress-label', progress).textContent = 'Błąd';
+          return;
+        }
+        const { job_id } = await r.json();
+        startSSE(job_id, progress, doDownload);
+      };
+      doDownload();
     });
     tbody.appendChild(tr);
   }
@@ -335,12 +465,15 @@ function renderTwQualities(card, qualities, baseMeta, params){
   formatsEl.appendChild(table);
 }
 
-async function twitchResolve(url){
+async function twitchResolve(url, cachedData = null){
   showSpinner(true);
   try{
-    const r = await fetch('/api/twitch/resolve', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ url }) });
-    if(!r.ok) throw new Error('Błąd rozwiązywania Twitch');
-    const data = await r.json();
+    let data = cachedData;
+    if (!data) {
+      const r = await fetch('/api/twitch/resolve', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ url }) });
+      if(!r.ok) throw new Error('Błąd rozwiązywania Twitch');
+      data = await r.json();
+    }
 
     const card = createItemCard({
       title: data.title,
@@ -348,7 +481,12 @@ async function twitchResolve(url){
       duration: data.duration,
       thumbnail: data.thumbnail,
     });
+    // Przechowaj title i release_date jako dataset do późniejszego użycia
+    card.dataset.twitchTitle = data.title || '';
+    card.dataset.twitchReleaseDate = data.release_date || '';
+    card.dataset.url = url;
     twResults.prepend(card);
+    if (typeof UIState !== 'undefined') UIState.add(url, 'twitch', data);
 
     // render dual-handle slider nad tabelą jakości
     const dur = Number(data.duration||0);
@@ -360,11 +498,11 @@ async function twitchResolve(url){
         <div class="range-dual">
           <div class="range-track"></div>
           <div class="range-fill"></div>
-            <input type="range" data-role="start" min="0" max="${dur}" step="1" value="${Math.min(900, dur>900?900:0)}" />
-            <input type="range" data-role="end" min="0" max="${dur}" step="1" value="${dur}" />
+            <input type="range" data-role="start" min="0" max="${dur}" step="0.1" value="${Math.min(960, dur>960?960:0)}" />
+            <input type="range" data-role="end" min="0" max="${dur}" step="0.1" value="${dur}" />
         </div>
       </div>
-      <div class="range-labels"><span class="start-label">00:15:00</span><span class="mid-label">00:00:00</span><span class="end-label">${fmtHMS(dur)}</span></div>
+      <div class="range-labels"><span class="start-label">00:16:00</span><span class="mid-label">00:00:00</span><span class="end-label">${fmtHMS(dur)}</span></div>
     `;
     formatsEl.before(sliderWrap);
 
@@ -397,8 +535,8 @@ async function twitchResolve(url){
       fill.style.left = `${left}%`;
       fill.style.right = `${100-right}%`;
     }
-    // Ustaw domyślny start 15:00, jeśli VOD dłuższy; inaczej 0
-    if(dur > 900){ startInput.value = '900'; } else { startInput.value = '0'; }
+    // Ustaw domyślny start 16:00, jeśli VOD dłuższy; inaczej 0
+    if(dur > 960){ startInput.value = '960'; } else { startInput.value = '0'; }
     endInput.value = String(dur);
     syncDual();
     // Aktualizacja rozmiarów w tabeli jakości na zmianę zakresu
@@ -422,7 +560,37 @@ async function twitchResolve(url){
     startInput.addEventListener('input', ()=>{ syncDual(); updateTwTableSizes(); });
     endInput.addEventListener('input', ()=>{ syncDual(); updateTwTableSizes(); });
 
-    renderTwQualities(card, data.qualities||[], data, {});
+    // Obsługa klawiszy strzałek dla precyzyjnej regulacji (shift = 10x szybciej)
+    startInput.addEventListener('keydown', (e)=>{
+      if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)){
+        const step = e.shiftKey ? 10 : 1;
+        const cur = Number(startInput.value) || 0;
+        if(e.key === 'ArrowLeft' || e.key === 'ArrowDown'){
+          startInput.value = Math.max(0, cur - step);
+        } else {
+          startInput.value = Math.min(dur, cur + step);
+        }
+        syncDual();
+        updateTwTableSizes();
+        e.preventDefault();
+      }
+    });
+    endInput.addEventListener('keydown', (e)=>{
+      if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)){
+        const step = e.shiftKey ? 10 : 1;
+        const cur = Number(endInput.value) || 0;
+        if(e.key === 'ArrowLeft' || e.key === 'ArrowDown'){
+          endInput.value = Math.max(0, cur - step);
+        } else {
+          endInput.value = Math.min(dur, cur + step);
+        }
+        syncDual();
+        updateTwTableSizes();
+        e.preventDefault();
+      }
+    });
+
+    renderTwQualities(card, data.qualities||[], data, url);
     // Pierwsze przeliczenie rozmiarów dla domyślnego zakresu
     updateTwTableSizes();
   } finally{ showSpinner(false); }
@@ -431,7 +599,175 @@ async function twitchResolve(url){
 twCheckBtn?.addEventListener('click', ()=>{
   const url = (twUrlInput?.value||'').trim();
   if(url.length>10 && url.includes('http')){
+    // Sprawdź czy już istnieje karta
+    const existing = $(`.card[data-url="${url}"]`);
+    if(existing) {
+      if(existing.classList.contains('is-downloading')) {
+        return; // skip
+      } else {
+        existing.remove(); // e.g. previous error or finished, recreate
+      }
+    }
     twitchResolve(url).catch(console.error);
   }
 });
 
+
+
+// ===== State Restoration =====
+const UIState = {
+  get urls() { return JSON.parse(localStorage.getItem('openedUrls') || '[]'); },
+  add(url, platform, data) {
+     const all = this.urls.filter(x => x.url !== url);
+     all.unshift({url, platform, data});
+     localStorage.setItem('openedUrls', JSON.stringify(all));
+  },
+  remove(url) {
+     localStorage.setItem('openedUrls', JSON.stringify(this.urls.filter(x => x.url !== url)));
+  }
+};
+
+document.addEventListener('DOMContentLoaded', async () => {
+    const savedTab = localStorage.getItem('activeTab');
+    if (savedTab) {
+        const btn = document.querySelector(`.tab[data-tab="${savedTab}"]`);
+        if (btn) btn.click();
+    }
+
+    try {
+        const r = await fetch('/api/state');
+        if (r.ok) {
+            const data = await r.json();
+            if (typeof data.parallel !== 'undefined') {
+                const parallelToggle = document.querySelector('#parallelToggle');
+                if (parallelToggle) parallelToggle.checked = data.parallel;
+            }
+            for (const job of data.jobs) {
+                const u = job.meta?.url || job.req_data?.url || job.req_data?.original_url;
+                if (document.querySelector(`.card[data-job="${job.id}"]`)) continue;
+                if (u) {
+                    UIState.remove(u);
+                    const existing = document.querySelector(`.card[data-url="${u}"]`);
+                    if (existing) existing.remove();
+                }
+
+                const card = createItemCard(job.meta || {});
+                card.dataset.job = job.id;
+                card.dataset.url = u;
+                const closeBtn = card.querySelector('.close');
+                if (closeBtn) closeBtn.classList.remove('hidden');
+                if (!job.done && !job.error) {
+                  card.classList.add('is-downloading');
+                }
+
+                if (job.platform === 'twitch') {
+                    const twResults = document.querySelector('#twResults');
+                    twResults.append(card);
+                } else {
+                    const queue = document.querySelector('#queue');
+                    queue.append(card);
+                }
+
+                const formatsEl = card.querySelector('.formats');
+                formatsEl.innerHTML = '';
+                const progress = renderProgress(formatsEl, job.info_text || '');
+                if (!job.done && !job.error) {
+                    startSSE(job.id, progress);
+                } else if (job.error) {
+                    // job.error - wyświetl error z ostatnimi danymi + retry/resume buttons
+                    const lp = job.last_progress || {};
+                    const fill = progress.querySelector('.progress-fill');
+                    const label = progress.querySelector('.progress-label');
+                    if(label) label.textContent = `${(lp.percent || 0).toFixed(1)}%`;
+                    if(fill) fill.style.width = `${lp.percent || 0}%`;
+                    progress.classList.add('progress-retrying');
+                    const inLeft = progress.querySelector('.progress-left');
+                    const inRight = progress.querySelector('.progress-right');
+                    if(inLeft) inLeft.textContent = lp.downloaded || '?';
+                    if(inRight) inRight.textContent = lp.size || '?';
+                    const rightSpan = progress.querySelector('.right');
+                    if(rightSpan) rightSpan.textContent = lp.speed || '0 B/s';
+
+                    // Dodaj retry/resume buttons
+                    const actionsDiv = document.createElement('div');
+                    actionsDiv.className = 'retry-actions';
+
+                    const retryBtn = document.createElement('button');
+                    retryBtn.className = 'retry-btn';
+                    retryBtn.textContent = 'Retry from start';
+                    retryBtn.onclick = async () => {
+                      try { await fetch(`/api/cancel/${job.id}`, { method: 'DELETE' }); } catch(e) {}
+                      const reqBody = {...job.req_data, meta: job.meta, info_text: job.info_text};
+                      if (job.platform === 'twitch') {
+                        reqBody.start_sec = 0;
+                        reqBody.end_sec = job.req_data.end_sec;
+                      }
+                      const endpoint = job.platform === 'twitch' ? '/api/twitch/download' : '/api/yt/download';
+                      try {
+                        const r = await fetch(endpoint, {method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(reqBody)});
+                        if (r.ok) {
+                          const {job_id: newJobId} = await r.json();
+                          card.dataset.job = newJobId;
+                          actionsDiv.remove();
+                          progress.classList.remove('progress-cancelled');
+                          label.textContent = 'Starting...';
+                          startSSE(newJobId, progress);
+                        }
+                      } catch(e) { console.error(e); }
+                    };
+                    actionsDiv.appendChild(retryBtn);
+
+                    // Resume button dla Twitch
+                    if (job.platform === 'twitch' && job.last_time && job.last_time > 15) {
+                      const resumeBtn = document.createElement('button');
+                      resumeBtn.className = 'retry-btn primary';
+                      resumeBtn.textContent = 'Resume download';
+                      resumeBtn.onclick = async () => {
+                        try { await fetch(`/api/cancel/${job.id}`, { method: 'DELETE' }); } catch(e) {}
+                        const reqBody = {...job.req_data, meta: job.meta, info_text: job.info_text};
+                        reqBody.start_sec = Math.max(0, job.last_time - 15);
+                        reqBody.end_sec = job.req_data.end_sec;
+                        try {
+                          const r = await fetch('/api/twitch/download', {method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(reqBody)});
+                          if (r.ok) {
+                            const {job_id: newJobId} = await r.json();
+                            card.dataset.job = newJobId;
+                            actionsDiv.remove();
+                            progress.classList.remove('progress-cancelled');
+                            label.textContent = 'Resuming...';
+                            startSSE(newJobId, progress);
+                          }
+                        } catch(e) { console.error(e); }
+                      };
+                      actionsDiv.appendChild(resumeBtn);
+                    }
+                    progress.appendChild(actionsDiv);
+                } else {
+                    // job.done - ustaw last_progress lub domyślne wartości
+                    const lp = job.last_progress || {};
+                    const label = progress.querySelector('.progress-label');
+                    if(label) label.textContent = 'Done';
+                    progress.classList.add('progress-success');
+                    const fill = progress.querySelector('.progress-fill');
+                    if(fill) fill.style.width = '100%';
+                    // Ustaw ostatnie znane wartości rozmiarów
+                    const inLeft = progress.querySelector('.progress-left');
+                    const inRight = progress.querySelector('.progress-right');
+                    if(inLeft) inLeft.textContent = lp.downloaded || '?';
+                    if(inRight) inRight.textContent = lp.size || '?';
+                    const rightSpan = progress.querySelector('.right');
+                    if(rightSpan) rightSpan.textContent = lp.speed || '0 B/s';
+                }
+            }
+        }
+    } catch(e) { console.error(e); }
+
+    for (const item of UIState.urls) {
+        if (document.querySelector(`.card[data-url="${item.url}"]`)) continue;
+        if (item.platform === 'twitch') {
+            if (typeof twitchResolve !== 'undefined') twitchResolve(item.url, item.data).catch(e => console.error(e));
+        } else {
+            if (typeof fetchFormats !== 'undefined') fetchFormats(item.url, item.data).catch(e => console.error(e));
+        }
+    }
+});
