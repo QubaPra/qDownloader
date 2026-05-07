@@ -24,6 +24,44 @@ uvicorn app:app --host 0.0.0.0 --port 8000 --reload
 ```
 3. Otwórz w przeglądarce: http://localhost:8000
 
+## Android (Termux)
+Po zrobieniu `git pull` na telefonie:
+
+1. Przejdź do katalogu projektu i uruchom setup:
+```
+bash termux_setup.sh
+```
+
+2. Zainstaluj globalną komendę w Termux:
+```
+bash install_termux_command.sh
+```
+
+3. Uruchamiaj aplikację jedną komendą:
+```
+qdownloader
+```
+
+Co robi `qdownloader`:
+- startuje API (`uvicorn`) na porcie `8000`
+- automatycznie otwiera przeglądarkę pod `http://127.0.0.1:8000/`
+
+### Skrót na ekranie głównym (opcjonalnie)
+1. Uruchom:
+```
+bash install_termux_shortcut.sh
+```
+2. Zainstaluj aplikację `Termux:Widget`.
+3. Dodaj widget Termux na ekran główny i wybierz skrypt `qdownloader`.
+
+### Konfigurowalne zmienne (opcjonalnie)
+Możesz ustawić przed startem:
+```
+export QD_PORT=8000
+export QD_HOST=0.0.0.0
+export PYTHON_BIN=python
+```
+
 ## Konfiguracja pobierania
 - Domyślna ścieżka zapisu: `./downloads` względem katalogu uruchomienia
 - Możesz wskazać własną ścieżkę w pierwszym polu UI (opcjonalnie)

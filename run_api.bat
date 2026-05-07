@@ -4,7 +4,7 @@ cd /d "%~dp0"
 echo [+] Uruchamianie API qDownloader...
 echo.
 
-REM Otw�rz przegl�dark� w tle (bez nowego okna)
+REM Otworz przegledarke w tle (bez nowego okna)
 start "" http://localhost:8000/
 
 REM Uruchom Uvicorn w obecnym oknie
