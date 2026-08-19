@@ -233,6 +233,8 @@ async def run_download(job_id: str, url: str, fmt_video: str, out_dir: Path):
                 except Exception: pass
                 if payload is None and txt:
                     low = txt.lower()
+                    if "error" in low or "failed" in low:
+                        print(f"[youtube] yt-dlp błąd: {txt}")
                     if ("retry" in low or "retrying" in low):
                         if not retrying_flag:
                             retrying_flag = True
@@ -323,6 +325,7 @@ async def run_download(job_id: str, url: str, fmt_video: str, out_dir: Path):
                     job.last_time = 0.0
                     q.put_nowait({"type": "cancelled", "job_id": job_id, "final": True})
                 else:
+                    print(f"[youtube] Zakończono z błędem (kod {rc}) dla zadania {job_id}")
                     try: shutil.rmtree(temp_dir, ignore_errors=True)
                     except Exception: pass
                     job.error = "Download failed or incomplete"
@@ -331,6 +334,7 @@ async def run_download(job_id: str, url: str, fmt_video: str, out_dir: Path):
                 done_fut.set_result(rc)
             loop.call_soon_threadsafe(finalize)
         except Exception as e:
+            print(f"[youtube] Wyjątek w wątku pobierania: {e}")
             loop.call_soon_threadsafe(done_fut.set_result, -1)
 
     threading.Thread(target=reader, daemon=True).start()

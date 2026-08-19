@@ -481,7 +481,12 @@ async def run_download_twitch(job_id, m3u8_url, out_dir, ext, start_sec, end_sec
             state = {}
             for line in proc.stdout:
                 line = (line or "").strip()
-                if not line or "=" not in line: continue
+                if not line: continue
+                if "=" not in line:
+                    low = line.lower()
+                    if "error" in low or "failed" in low or "could not" in low:
+                        print(f"[twitch] ffmpeg błąd: {line}")
+                    continue
                 k, v = line.split("=", 1)
                 state[k] = v
                 if k == "out_time_ms":
@@ -544,7 +549,9 @@ async def run_download_twitch(job_id, m3u8_url, out_dir, ext, start_sec, end_sec
                         "speed": state.get("speed", "Unknown")
                     })
             loop.call_soon_threadsafe(done_fut.set_result, proc.wait())
-        except Exception: loop.call_soon_threadsafe(done_fut.set_result, -1)
+        except Exception as e:
+            print(f"[twitch] Wyjątek w wątku czytającym (reader): {e}")
+            loop.call_soon_threadsafe(done_fut.set_result, -1)
 
     async def watchdog():
         nonlocal retrying_ui, attempts
@@ -597,7 +604,7 @@ async def run_download_twitch(job_id, m3u8_url, out_dir, ext, start_sec, end_sec
         job.last_time = last_out_time_val
         await q.put({"type": "cancelled", "job_id": job_id, "final": True, "last_time": last_out_time_val})
     else:
-        print(f"[twitch] Download error or incomplete")
+        print(f"[twitch] Zakończono z błędem (kod {rc}) dla zadania {job_id}")
         if ext == "ts" and Path(out_tmp).exists() and Path(out_tmp).stat().st_size > 0:
             try:
                 shutil.move(out_tmp, out_final)
@@ -645,6 +652,7 @@ async def twitch_download(data: TwitchDownloadRequest):
             else:
                 await run_download_twitch(job_id, m3u8_url, dl_dir, data.ext, data.start_sec, data.end_sec, data.title, data.release_date)
         except Exception as e:
+            print(f"[twitch] Główny błąd pobierania zadania {job_id}: {e}")
             q = core.state.progress_queues.get(job_id)
             if q:
                 await q.put({"type": "error", "job_id": job_id, "final": True, "message": str(e)})
